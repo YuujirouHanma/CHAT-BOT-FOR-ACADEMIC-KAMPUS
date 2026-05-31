@@ -1,0 +1,94 @@
+"""High-level retrieval orchestrator.
+
+Wires together: Embedder → QdrantStore (hybrid search) → Reranker.
+
+This is the single entry point for the generation layer; it returns
+final reranked chunks ready to inject into the LLM prompt.
+
+Pipeline:
+    query
+      ↓ Embedder.embed_query()
+    (dense_vec, sparse_vec)
+      ↓ QdrantStore.search()  (hybrid RRF if sparse enabled)
+    top_k candidates with payload
+      ↓ Reranker.rerank()
+    top_n final results sorted by relevance
+"""
+from __future__ import annotations
+
+from src.config import settings
+from src.indexing.embedder import Embedder
+from src.retrieval.reranker import Reranker
+from src.storage.qdrant_store import QdrantStore
+from src.utils.logger import logger
+
+
+class HybridRetriever:
+    """End-to-end retrieval: embed → vector search → rerank.
+
+    All three sub-components can be injected for testing.
+    """
+
+    def __init__(
+        self,
+        embedder: Embedder | None = None,
+        store: QdrantStore | None = None,
+        reranker: Reranker | None = None,
+    ) -> None:
+        self._embedder = embedder or Embedder()
+        self._store = store or QdrantStore()
+        self._reranker = reranker or Reranker()
+
+    async def retrieve(
+        self,
+        query: str,
+        retrieval_top_k: int | None = None,
+        rerank_top_k: int | None = None,
+        source_filter: str | None = None,
+    ) -> list[dict]:
+        """Run the full retrieval pipeline.
+
+        Args:
+            query: User question.
+            retrieval_top_k: Initial vector-search candidates. Defaults to
+                settings.retrieval_top_k. More = better recall, slower rerank.
+            rerank_top_k: Final results returned to caller. Defaults to
+                settings.rerank_top_k.
+            source_filter: Optional source filename to restrict to one doc.
+
+        Returns:
+            List of dicts with keys: chunk_id, score (Qdrant), rerank_score,
+            payload (contains text, raw_html, image_base64, metadata).
+        """
+        cleaned_query = (query or "").strip()
+        if not cleaned_query:
+            raise ValueError("Empty query")
+
+        retrieval_top_k = retrieval_top_k or settings.retrieval_top_k
+        rerank_top_k = rerank_top_k or settings.rerank_top_k
+
+        logger.info(
+            "Retrieving for query (len={}): retrieval_top_k={}, rerank_top_k={}",
+            len(cleaned_query),
+            retrieval_top_k,
+            rerank_top_k,
+        )
+
+        dense, sparse = await self._embedder.embed_query(cleaned_query)
+
+        candidates = await self._store.search(
+            dense_vector=dense,
+            sparse_vector=sparse,
+            top_k=retrieval_top_k,
+            source_filter=source_filter,
+        )
+        if not candidates:
+            logger.warning("Vector search returned no candidates")
+            return []
+
+        reranked = await self._reranker.rerank(
+            query=cleaned_query,
+            candidates=candidates,
+            top_k=rerank_top_k,
+        )
+        return reranked
