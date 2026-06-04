@@ -28,49 +28,50 @@ Query → Hybrid retrieval → BGE reranker → Top-5
 | Summarization (teks, tabel) | Llama 3.1 via Groq |
 | Summarization (gambar) | GPT-4o mini |
 | Embedding | bge-m3 (multilingual) |
-| Vector store | Qdrant |
+| Vector store | Qdrant (local mode) |
 | Reranker | bge-reranker-v2-m3 |
-| Orchestration | LlamaIndex |
-| Generation | GPT-4o mini (multimodal) |
+| Generation | Groq Llama 3.3 70B / GPT-4o mini |
 
 ## Setup
 
 ```bash
 python -m venv .venv
-source .venv/bin/activate
+.venv\Scripts\activate      # Windows
+# source .venv/bin/activate  # Linux/Mac
 
 pip install -r requirements.txt
 
 cp .env.example .env
+# Edit .env: isi OPENAI_API_KEY dan GROQ_API_KEY
 
-docker compose up -d
-curl http://localhost:6333/healthz
-
-pytest tests/ -v
+uvicorn src.api.main:app --reload --port 8000
 ```
+
+Swagger UI tersedia di: http://localhost:8000/docs
 
 ## Struktur folder
 
 ```
 src/
 ├── config.py              # Pydantic settings
-├── schemas.py             # ParsedElement, shared types
+├── schemas.py             # ParsedElement, Chunk, shared types
 ├── ingestion/             # Unstructured.io parsing
 ├── indexing/              # Summarization, chunking, embedding
 ├── storage/               # Qdrant client wrapper
 ├── retrieval/             # Hybrid retrieval + reranking
 ├── generation/            # LLM generation with citation
 └── utils/                 # Logger, helpers
+tests/                     # Unit & integration tests
 ```
 
 ## Status pengembangan
 
 - [x] Project structure & config
 - [x] Ingestion (Unstructured.io)
-- [ ] Multimodal summarization
-- [ ] Chunking & embedding
-- [ ] Qdrant storage
-- [ ] Hybrid retrieval & reranking
-- [ ] Generation pipeline
-- [ ] FastAPI endpoints
+- [x] Multimodal summarization
+- [x] Chunking & embedding (BGE-M3)
+- [x] Qdrant storage (local mode)
+- [x] Hybrid retrieval & reranking
+- [x] Generation pipeline (Groq / OpenAI)
+- [x] FastAPI endpoints
 - [ ] Evaluation (RAGAS)
