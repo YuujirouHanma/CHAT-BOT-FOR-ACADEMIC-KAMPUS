@@ -1,16 +1,30 @@
+# Environment & secrets
 .env
+
+# Python
 .venv/
 venv/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Tools
 .pytest_cache/
 .ruff_cache/
-data/uploads/*
-data/processed/*
-!data/uploads/.gitkeep
-!data/processed/.gitkeep
 .DS_Store
 .idea/
 .vscode/
 *.log
+
+# Local vector DB — jangan push data lokal
+qdrant_storage/
+
+# Upload & processed data — jangan push file pengguna
+data/uploads/*
+data/processed/*
+!data/uploads/.gitkeep
+!data/processed/.gitkeep
+
+# Claude Code settings lokal
 .claude/

@@ -16,7 +16,8 @@ class IndexResponse(BaseModel):
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=1)
+    # Limit question length to avoid excessively large requests
+    question: str = Field(..., min_length=1, max_length=2048)
     source_filter: str | None = None
 
 

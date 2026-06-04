@@ -22,11 +22,7 @@ def _load_reranker_model() -> Any:
     """Load reranker once. Deferred import so module loads without FlagEmbedding."""
     from FlagEmbedding import FlagReranker
 
-    logger.info(
-        "Loading reranker model {} on {}",
-        settings.reranker_model,
-        settings.embed_device,
-    )
+    logger.info(f"Loading reranker model {settings.reranker_model} on {settings.embed_device}")
     return FlagReranker(
         settings.reranker_model,
         use_fp16=settings.embed_device != "cpu",
@@ -89,10 +85,7 @@ class Reranker:
 
         result = scored[:top_k]
         logger.info(
-            "Reranked {} → top {}, best score={:.3f}",
-            len(candidates),
-            len(result),
-            result[0]["rerank_score"] if result else 0.0,
+            f"Reranked {len(candidates)} → top {len(result)}, best score={result[0]['rerank_score'] if result else 0.0:.3f}"
         )
         return result
 

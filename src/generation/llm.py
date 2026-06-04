@@ -1,22 +1,31 @@
-"""Generation LLM wrapper.
-
-Uses an OpenAI-compatible chat completion API. Vision content blocks are
-attached when retrieved chunks include images, so the model can re-read
-the actual image at answer time rather than relying solely on the
-indexing-time description.
-
-Defaults to gpt-4o-mini (multimodal). For self-hosted, swap to Qwen2.5-VL
-served via vLLM with an OpenAI-compatible endpoint.
-"""
+"""Generation LLM wrapper."""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING, cast
 
-from openai import APIConnectionError as OAIConnError
-from openai import APITimeoutError as OAITimeoutError
-from openai import AsyncOpenAI
-from openai import InternalServerError as OAIServerError
-from openai import RateLimitError as OAIRateLimit
+if TYPE_CHECKING:
+    from openai import APIConnectionError as OAIConnError
+    from openai import APITimeoutError as OAITimeoutError
+    from openai import AsyncOpenAI
+    from openai import InternalServerError as OAIServerError
+    from openai import RateLimitError as OAIRateLimit
+else:
+    try:
+        from openai import APIConnectionError as OAIConnError
+        from openai import APITimeoutError as OAITimeoutError
+        from openai import AsyncOpenAI
+        from openai import InternalServerError as OAIServerError
+        from openai import RateLimitError as OAIRateLimit
+    except ImportError:
+        class _DummyRetryableError(Exception):
+            pass
+
+        OAIConnError = _DummyRetryableError
+        OAITimeoutError = _DummyRetryableError
+        AsyncOpenAI = Any
+        OAIServerError = _DummyRetryableError
+        OAIRateLimit = _DummyRetryableError
+
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -30,10 +39,16 @@ from src.generation.prompts import (
     FormattedContext,
     build_user_prompt,
 )
-from src.indexing.summarizer import _detect_image_mime
+from src.utils.image import detect_image_mime
 from src.utils.logger import logger
 
-_RETRYABLE = (OAIConnError, OAITimeoutError, OAIServerError, OAIRateLimit)
+# Explicit type annotation agar static checker tidak bingung
+_RETRYABLE: tuple[type[Exception], ...] = (
+    OAIConnError,
+    OAITimeoutError,
+    OAIServerError,
+    OAIRateLimit,
+)
 
 
 class GenerationError(RuntimeError):
@@ -44,24 +59,27 @@ class LLMGenerator:
     """Multimodal-aware generator. One instance per app run."""
 
     def __init__(self, client: AsyncOpenAI | None = None) -> None:
-        self._client = client or AsyncOpenAI(
-            api_key=settings.openai_api_key.get_secret_value()
-        )
+        if client:
+            self._client = client
+        elif settings.generation_provider == "groq":
+            groq_key: Any = settings.groq_api_key
+            raw_key = groq_key.get_secret_value() if hasattr(groq_key, "get_secret_value") else str(groq_key)
+            self._client = AsyncOpenAI(
+                api_key=raw_key,
+                base_url="https://api.groq.com/openai/v1",
+            )
+            logger.info("LLMGenerator using Groq provider ({})", settings.generation_model)
+        else:
+            api_key_obj: Any = settings.openai_api_key
+            raw_key = api_key_obj.get_secret_value() if hasattr(api_key_obj, "get_secret_value") else str(api_key_obj)
+            self._client = AsyncOpenAI(api_key=raw_key)
+            logger.info("LLMGenerator using OpenAI provider ({})", settings.generation_model)
 
     async def generate(
         self,
         question: str,
         context: FormattedContext,
     ) -> str:
-        """Generate an answer grounded in the retrieved context.
-
-        Args:
-            question: User question.
-            context: Output of `format_retrieval_results()`.
-
-        Returns:
-            The model's answer as a plain string.
-        """
         user_prompt = build_user_prompt(question, context)
         user_content = self._build_user_content(user_prompt, context)
 
@@ -76,10 +94,9 @@ class LLMGenerator:
     def _build_user_content(
         user_prompt: str, context: FormattedContext
     ) -> list[dict[str, Any]]:
-        """Build the user message — text first, then any image blocks."""
         content: list[dict[str, Any]] = [{"type": "text", "text": user_prompt}]
         for img in context.image_payloads:
-            mime = _detect_image_mime(img["image_base64"])
+            mime = detect_image_mime(img["image_base64"])
             content.append(
                 {
                     "type": "image_url",
@@ -99,15 +116,15 @@ class LLMGenerator:
     )
     async def _call_with_retry(self, messages: list[dict[str, Any]]) -> str:
         try:
-            response = await self._client.chat.completions.create(
+            response = await self._client.chat.completions.create(  # type: ignore[union-attr, call-arg]
                 model=settings.generation_model,
-                messages=messages,
+                messages=cast(Any, messages),
                 temperature=settings.generation_temperature,
                 max_tokens=settings.generation_max_tokens,
             )
-        except _RETRYABLE:
-            raise
         except Exception as exc:
+            if isinstance(exc, _RETRYABLE):
+                raise  # Biarkan tenacity menangani retry
             raise GenerationError(f"LLM call failed: {exc}") from exc
 
         content = (response.choices[0].message.content or "").strip()
@@ -115,8 +132,6 @@ class LLMGenerator:
             raise GenerationError("LLM returned empty content")
 
         logger.info(
-            "Generated answer ({} chars) using {}",
-            len(content),
-            settings.generation_model,
+            f"Generated answer ({len(content)} chars) using {settings.generation_model}"
         )
         return content

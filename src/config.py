@@ -12,10 +12,39 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field, SecretStr, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+if TYPE_CHECKING:
+    from pydantic import Field, SecretStr, field_validator, model_validator
+    from pydantic_settings import BaseSettings, SettingsConfigDict
+else:
+    try:
+        from pydantic import Field, SecretStr, field_validator, model_validator
+        from pydantic_settings import BaseSettings, SettingsConfigDict
+    except ImportError:  # pragma: no cover - dev-time fallback when deps not installed
+        from typing import Any
+
+        def Field(*_args: Any, **_kwargs: Any) -> Any:  # type: ignore[no-any-return]
+            return None
+
+        SecretStr = str
+
+        def field_validator(*_args: Any, **_kwargs: Any) -> Any:  # type: ignore[no-any-return]
+            def _decorator(fn: Any) -> Any:
+                return fn
+
+            return _decorator
+
+        def model_validator(*_args: Any, **_kwargs: Any) -> Any:  # type: ignore[no-any-return]
+            def _decorator(fn: Any) -> Any:
+                return fn
+
+            return _decorator
+
+        class BaseSettings:  # type: ignore[misc]
+            pass
+
+        SettingsConfigDict = dict
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -58,6 +87,7 @@ class Settings(BaseSettings):
     openai_vision_model: str = "gpt-4o-mini"
 
     generation_model: str = "gpt-4o-mini"
+    generation_provider: Literal["openai", "groq"] = "openai"
     generation_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     generation_max_tokens: int = Field(default=1024, ge=64, le=8192)
 
@@ -106,7 +136,7 @@ class Settings(BaseSettings):
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]
 
 
 settings = get_settings()

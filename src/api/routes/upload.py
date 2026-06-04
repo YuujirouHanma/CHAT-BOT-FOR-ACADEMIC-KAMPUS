@@ -49,7 +49,7 @@ async def upload_document(
         ) from exc
     except Exception as exc:
         target_path.unlink(missing_ok=True)
-        logger.exception("Indexing failed for {}", file.filename)
+        logger.exception(f"Indexing failed for {file.filename}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to index document: {exc}",
@@ -73,5 +73,5 @@ def _safe_save(file: UploadFile) -> Path:
     with target.open("wb") as out:
         shutil.copyfileobj(file.file, out)
 
-    logger.info("Saved upload to {}", target)
+    logger.info(f"Saved upload to {target}")
     return target

@@ -15,21 +15,52 @@ that element is returned without a summary instead of crashing the batch.
 from __future__ import annotations
 
 import asyncio
-import base64 as _b64
 from collections.abc import Sequence
+from typing import Any, TYPE_CHECKING
 
-from groq import AsyncGroq
-from groq import APIConnectionError as GroqConnError
-from groq import APITimeoutError as GroqTimeoutError
-from groq import InternalServerError as GroqServerError
-from groq import RateLimitError as GroqRateLimit
-from openai import AsyncOpenAI
-from openai import APIConnectionError as OAIConnError
-from openai import APITimeoutError as OAITimeoutError
-from openai import InternalServerError as OAIServerError
-from openai import RateLimitError as OAIRateLimit
+class _DummyRetryableError(Exception):
+    pass
+
+if TYPE_CHECKING:
+    from groq import AsyncGroq
+    from groq import APIConnectionError as GroqConnError
+    from groq import APITimeoutError as GroqTimeoutError
+    from groq import InternalServerError as GroqServerError
+    from groq import RateLimitError as GroqRateLimit
+    from openai import AsyncOpenAI
+    from openai import APIConnectionError as OAIConnError
+    from openai import APITimeoutError as OAITimeoutError
+    from openai import InternalServerError as OAIServerError
+    from openai import RateLimitError as OAIRateLimit
+else:
+    try:
+        from groq import AsyncGroq
+        from groq import APIConnectionError as GroqConnError
+        from groq import APITimeoutError as GroqTimeoutError
+        from groq import InternalServerError as GroqServerError
+        from groq import RateLimitError as GroqRateLimit
+    except ImportError:  # pragma: no cover - runtime should have package installed
+        AsyncGroq = Any
+        GroqConnError = _DummyRetryableError
+        GroqTimeoutError = _DummyRetryableError
+        GroqServerError = _DummyRetryableError
+        GroqRateLimit = _DummyRetryableError
+
+    try:
+        from openai import AsyncOpenAI
+        from openai import APIConnectionError as OAIConnError
+        from openai import APITimeoutError as OAITimeoutError
+        from openai import InternalServerError as OAIServerError
+        from openai import RateLimitError as OAIRateLimit
+    except ImportError:  # pragma: no cover - runtime should have package installed
+        AsyncOpenAI = Any
+        OAIConnError = _DummyRetryableError
+        OAITimeoutError = _DummyRetryableError
+        OAIServerError = _DummyRetryableError
+        OAIRateLimit = _DummyRetryableError
+
 from tenacity import (
-    retry,
+    AsyncRetrying,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential,
@@ -37,7 +68,13 @@ from tenacity import (
 
 from src.config import settings
 from src.schemas import ElementType, ParsedElement
+from src.utils.image import detect_image_mime
 from src.utils.logger import logger
+
+
+def _detect_image_mime(image_base64: str) -> str:
+    """Backward-compatible wrapper expected by tests."""
+    return detect_image_mime(image_base64)
 
 _TABLE_SUMMARY_PROMPT = """Anda adalah asisten yang meringkas tabel untuk sistem retrieval-augmented generation (RAG) edukasi.
 
@@ -67,34 +104,22 @@ Fokus pada:
 Tujuan: deskripsi ini akan dipakai untuk mencari gambar dengan query mahasiswa."""
 
 
-_GROQ_RETRY_ERRORS = (GroqConnError, GroqTimeoutError, GroqServerError, GroqRateLimit)
-_OAI_RETRY_ERRORS = (OAIConnError, OAITimeoutError, OAIServerError, OAIRateLimit)
+_GROQ_RETRY_ERRORS: tuple[type[Exception], ...] = (
+    GroqConnError,
+    GroqTimeoutError,
+    GroqServerError,
+    GroqRateLimit,
+)
+_OAI_RETRY_ERRORS: tuple[type[Exception], ...] = (
+    OAIConnError,
+    OAITimeoutError,
+    OAIServerError,
+    OAIRateLimit,
+)
 
 
 class SummarizationError(RuntimeError):
     """Raised when a summarization call fails irrecoverably (after retries)."""
-
-
-def _detect_image_mime(image_base64: str) -> str:
-    """Detect image MIME type from base64-encoded magic bytes.
-
-    Returns image/png as a safe default. OpenAI vision auto-detects, but
-    sending the correct MIME prevents ambiguity.
-    """
-    try:
-        head = _b64.b64decode(image_base64[:24], validate=False)
-    except Exception:
-        return "image/png"
-
-    if head.startswith(b"\x89PNG\r\n\x1a\n"):
-        return "image/png"
-    if head[:3] == b"\xff\xd8\xff":
-        return "image/jpeg"
-    if head[:4] == b"GIF8":
-        return "image/gif"
-    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
-        return "image/webp"
-    return "image/png"
 
 
 class MultimodalSummarizer:
@@ -108,12 +133,23 @@ class MultimodalSummarizer:
         groq_client: AsyncGroq | None = None,
         openai_client: AsyncOpenAI | None = None,
     ) -> None:
-        self._groq = groq_client or AsyncGroq(
-            api_key=settings.groq_api_key.get_secret_value()
-        )
-        self._openai = openai_client or AsyncOpenAI(
-            api_key=settings.openai_api_key.get_secret_value()
-        )
+        # Get Groq API key safely
+        groq_key_obj: Any = settings.groq_api_key
+        if hasattr(groq_key_obj, "get_secret_value"):
+            groq_key = groq_key_obj.get_secret_value()
+        else:
+            groq_key = str(groq_key_obj)
+        
+        self._groq = groq_client or AsyncGroq(api_key=groq_key)
+        
+        # Get OpenAI API key safely
+        openai_key_obj: Any = settings.openai_api_key
+        if hasattr(openai_key_obj, "get_secret_value"):
+            openai_key = openai_key_obj.get_secret_value()
+        else:
+            openai_key = str(openai_key_obj)
+        
+        self._openai = openai_client or AsyncOpenAI(api_key=openai_key)
 
     async def summarize_table(self, table_html: str) -> str:
         cleaned = (table_html or "").strip()
@@ -127,65 +163,67 @@ class MultimodalSummarizer:
         cleaned = (image_base64 or "").strip()
         if not cleaned:
             raise ValueError("Empty image base64")
-        mime = _detect_image_mime(cleaned)
+        mime = detect_image_mime(cleaned)
         return await self._call_openai_vision(image_base64=cleaned, mime=mime)
 
-    @retry(
-        retry=retry_if_exception_type(_GROQ_RETRY_ERRORS),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
     async def _call_groq(self, prompt: str) -> str:
-        try:
-            response = await self._groq.chat.completions.create(
-                model=settings.groq_summary_model, #model llama-3.1-8b-instant
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.2,
-                max_tokens=512,
-            )
-        except _GROQ_RETRY_ERRORS:
-            raise
-        except Exception as exc:
-            raise SummarizationError(f"Groq call failed: {exc}") from exc
+        async for attempt in AsyncRetrying(
+            retry=retry_if_exception_type(_GROQ_RETRY_ERRORS),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            reraise=True,
+        ):
+            with attempt:
+                try:
+                    response = await self._groq.chat.completions.create(  # type: ignore[union-attr,call-arg]
+                        model=settings.groq_summary_model,
+                        messages=[{"role": "user", "content": prompt}],
+                        temperature=0.2,
+                        max_tokens=512,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, _GROQ_RETRY_ERRORS):
+                        raise  # Biarkan tenacity menangani retry
+                    raise SummarizationError(f"Groq call failed: {exc}") from exc
 
         content = (response.choices[0].message.content or "").strip()
         if not content:
             raise SummarizationError("Groq returned empty content")
         return content
 
-    @retry(
-        retry=retry_if_exception_type(_OAI_RETRY_ERRORS),
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=8),
-        reraise=True,
-    )
     async def _call_openai_vision(self, image_base64: str, mime: str) -> str:
-        try:
-            response = await self._openai.chat.completions.create(
-                model=settings.openai_vision_model, #model gpt-4o-mini
-                messages=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": _IMAGE_DESCRIPTION_PROMPT},
+        async for attempt in AsyncRetrying(
+            retry=retry_if_exception_type(_OAI_RETRY_ERRORS),
+            stop=stop_after_attempt(3),
+            wait=wait_exponential(multiplier=1, min=1, max=8),
+            reraise=True,
+        ):
+            with attempt:
+                try:
+                    response = await self._openai.chat.completions.create(  # type: ignore[union-attr,call-arg]
+                        model=settings.openai_vision_model,
+                        messages=[
                             {
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": f"data:{mime};base64,{image_base64}",
-                                    "detail": "low",
-                                },
-                            },
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": _IMAGE_DESCRIPTION_PROMPT},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:{mime};base64,{image_base64}",
+                                            "detail": "low",
+                                        },
+                                    },
+                                ],
+                            }
                         ],
-                    }
-                ],
-                temperature=0.2,
-                max_tokens=512,
-            )
-        except _OAI_RETRY_ERRORS:
-            raise
-        except Exception as exc:
-            raise SummarizationError(f"OpenAI vision call failed: {exc}") from exc
+                        temperature=0.2,
+                        max_tokens=512,
+                    )
+                except Exception as exc:
+                    if isinstance(exc, _OAI_RETRY_ERRORS):
+                        raise  # Biarkan tenacity menangani retry
+                    raise SummarizationError(f"OpenAI vision call failed: {exc}") from exc
 
         content = (response.choices[0].message.content or "").strip()
         if not content:
@@ -224,8 +262,7 @@ async def enrich_elements(
                 if element.element_type == ElementType.TABLE:
                     if not element.raw_html:
                         logger.warning(
-                            "Table {} has no HTML, skipping summary",
-                            element.element_id,
+                            f"Table {element.element_id} has no HTML, skipping summary"
                         )
                         return element
                     summary = await summarizer.summarize_table(element.raw_html)
@@ -233,8 +270,7 @@ async def enrich_elements(
                 elif element.element_type == ElementType.IMAGE:
                     if not element.image_base64:
                         logger.warning(
-                            "Image {} has no base64, skipping summary",
-                            element.element_id,
+                            f"Image {element.element_id} has no base64, skipping summary"
                         )
                         return element
                     summary = await summarizer.describe_image(element.image_base64)
@@ -244,12 +280,9 @@ async def enrich_elements(
 
                 return element.model_copy(update={"summary": summary})
 
-            except Exception as exc:
+            except Exception as exc:  # pyright: ignore[reportGeneralTypeIssues]
                 logger.error(
-                    "Summarization failed for {} {}: {}",
-                    element.element_type.value,
-                    element.element_id,
-                    exc,
+                    f"Summarization failed for {element.element_type.value} {element.element_id}: {exc}"
                 )
                 return element
 
@@ -260,8 +293,6 @@ async def enrich_elements(
         1 for e in results if e.element_type != ElementType.TEXT
     )
     logger.info(
-        "Enriched {}/{} non-text elements with summaries",
-        enriched_count,
-        target_count,
+        f"Enriched {enriched_count}/{target_count} non-text elements with summaries"
     )
     return list(results)

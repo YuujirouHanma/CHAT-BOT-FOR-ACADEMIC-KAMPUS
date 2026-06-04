@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from typing import Any
 
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
@@ -36,13 +37,14 @@ class QdrantStore:
         self,
         client: QdrantClient | None = None,
         collection: str | None = None,
+        enable_sparse: bool | None = None,
     ) -> None:
-        self._client = client or QdrantClient(
-            host=settings.qdrant_host,
-            port=settings.qdrant_port,
-        )
+        # MENGGUNAKAN LOCAL MODE SEPENUHNYA (Aman untuk disk dan RAM)
+        self._client = client or QdrantClient(path="./qdrant_storage")
         self._collection = collection or settings.qdrant_collection
-        self._enable_sparse = settings.enable_hybrid_search
+        self._enable_sparse = (
+            enable_sparse if enable_sparse is not None else settings.enable_hybrid_search
+        )
 
     async def ensure_collection(self) -> None:
         """Create the collection if it doesn't exist. Idempotent."""
@@ -120,6 +122,7 @@ class QdrantStore:
 
         use_hybrid = self._enable_sparse and sparse_vector is not None
         if use_hybrid:
+            assert sparse_vector is not None
             result = await asyncio.to_thread(
                 self._client.query_points,
                 collection_name=self._collection,
@@ -202,7 +205,7 @@ class QdrantStore:
                 "run Embedder.embed_chunks() first."
             )
 
-        vector: dict[str, list[float] | qm.SparseVector] = {
+        vector: dict[str, Any] = {
             _DENSE_VEC: chunk.dense_embedding
         }
         if self._enable_sparse and chunk.sparse_embedding:

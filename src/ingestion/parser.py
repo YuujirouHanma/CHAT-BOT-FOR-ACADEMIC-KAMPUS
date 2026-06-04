@@ -49,11 +49,18 @@ def parse_document(file_path: Path) -> list[ParsedElement]:
     validate_file(file_path)
     logger.info("Parsing document: {}", file_path.name)
 
-    partition_kwargs = _build_partition_kwargs(file_path)
+
+    is_pdf = file_path.suffix.lower() == ".pdf"
+    partition_kwargs: dict = (
+        {"strategy": "fast"}
+        if is_pdf
+        else {"strategy": "auto", "infer_table_structure": True}
+    )
 
     try:
         elements: list[Element] = partition(
-            filename=str(file_path), **partition_kwargs
+            filename=str(file_path),
+            **partition_kwargs,
         )
     except Exception as exc:
         logger.exception("Partition failed for {}", file_path.name)
