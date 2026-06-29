@@ -21,7 +21,13 @@ SYSTEM_PROMPT = """Anda adalah asisten pembelajaran untuk mahasiswa. Tugas Anda:
 3. Untuk pertanyaan yang melibatkan tabel atau gambar, baca data mentah yang disertakan dan kutip angka secara presisi.
 4. Sebutkan sumber di setiap klaim penting dengan format [Sumber N], di mana N adalah nomor sumber yang Anda kutip.
 5. Gunakan bahasa Indonesia yang jelas dan akademis. Jangan mengulang pertanyaan.
-6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat."""
+6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat.
+7. Di akhir setiap jawaban, tambahkan tepat 3 rekomendasi pertanyaan lanjutan yang relevan dengan format:
+
+PERTANYAAN_LANJUTAN:
+- [pertanyaan 1]
+- [pertanyaan 2]
+- [pertanyaan 3]"""
 
 
 USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
@@ -30,7 +36,7 @@ USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
 PERTANYAAN MAHASISWA:
 {question}
 
-JAWABAN (sertakan [Sumber N] untuk setiap klaim):"""
+JAWABAN (sertakan [Sumber N] untuk setiap klaim, lalu tambahkan PERTANYAAN_LANJUTAN di akhir):"""
 
 
 @dataclass(frozen=True)
@@ -103,3 +109,18 @@ def build_user_prompt(question: str, context: FormattedContext) -> str:
         context=context.text_block,
         question=question.strip(),
     )
+
+
+def parse_answer_and_suggestions(raw: str) -> tuple[str, list[str]]:
+    """Split LLM output into answer text and suggested follow-up questions."""
+    marker = "PERTANYAAN_LANJUTAN:"
+    if marker not in raw:
+        return raw.strip(), []
+
+    answer_part, suggestions_part = raw.split(marker, 1)
+    suggestions = [
+        line.lstrip("-•*0123456789. ").strip()
+        for line in suggestions_part.splitlines()
+        if line.strip() and line.strip() not in ("-", "•", "*")
+    ]
+    return answer_part.strip(), [s for s in suggestions if s][:3]

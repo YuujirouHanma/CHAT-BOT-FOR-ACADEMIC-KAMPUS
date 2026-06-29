@@ -1,20 +1,16 @@
 """FastAPI application entry point.
 
-Run locally:
-    uvicorn src.api.main:app --reload --port 8000
-
-The pipeline is constructed in `lifespan` so heavy models load once at startup
-(not per request) and the Qdrant collection is created if missing.
+Run: uvicorn src.api.main:app --reload --port 8000
 """
 from __future__ import annotations
 
-from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from src.api.routes import chat, upload
+from src.api.routes import batch, browse, chat, upload
 from src.config import settings
 from src.pipeline import RAGPipeline
 from src.utils.logger import logger
@@ -22,7 +18,8 @@ from src.utils.logger import logger
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    logger.info("Starting Classroom RAG (env={})", settings.app_env)
+    logger.info("Starting RAGAcademic (env={}, llm={}/{})",
+                settings.app_env, settings.generation_provider, settings.generation_model)
     pipeline = RAGPipeline()
     await pipeline.setup()
     app.state.pipeline = pipeline
@@ -34,9 +31,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(
-    title="Classroom RAG",
-    description="Multimodal RAG chatbot for educational materials",
-    version="0.1.0",
+    title="RAGAcademic",
+    description="Multimodal RAG chatbot untuk materi kuliah",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -49,9 +46,15 @@ app.add_middleware(
 )
 
 app.include_router(upload.router)
+app.include_router(batch.router)
+app.include_router(browse.router)
 app.include_router(chat.router)
 
 
 @app.get("/health", tags=["meta"])
 async def health() -> dict[str, str]:
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "version": "0.3.0",
+        "llm": f"{settings.generation_provider}/{settings.generation_model}",
+    }

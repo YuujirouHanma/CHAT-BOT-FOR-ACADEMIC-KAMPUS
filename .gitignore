@@ -82,8 +82,13 @@ data/processed/*
 !data/uploads/.gitkeep
 !data/processed/.gitkeep
 
-# Claude Code settings lokal
+# Storage materi — simpan struktur folder (.gitkeep), abaikan file data
+storage/**/*
+!storage/**/.gitkeep
+
+# Local tool & editor settings
 .claude/
+pyrightconfig.json
 
 # Misc
 .abstra/

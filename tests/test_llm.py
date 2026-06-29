@@ -54,9 +54,9 @@ class TestLLMGenerator:
 
         messages = create_mock.call_args.kwargs["messages"]
         user_content = messages[1]["content"]
-        assert isinstance(user_content, list)
-        assert len(user_content) == 1
-        assert user_content[0]["type"] == "text"
+        # Text-only: content is a plain string, not a list
+        assert isinstance(user_content, str)
+        assert "just text" in user_content
 
     @pytest.mark.asyncio
     async def test_image_context_adds_image_url_block(self) -> None:

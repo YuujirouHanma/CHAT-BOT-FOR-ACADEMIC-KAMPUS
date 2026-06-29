@@ -80,6 +80,8 @@ class Chunker:
                 source_file=element.source_file,
                 page_number=element.page_number,
                 chunk_index=idx,
+                course=element.course,
+                week=element.week,
             )
             for idx, part in enumerate(parts)
             if part.strip()
@@ -103,6 +105,8 @@ class Chunker:
             source_file=element.source_file,
             page_number=element.page_number,
             chunk_index=0,
+            course=element.course,
+            week=element.week,
             raw_html=element.raw_html,
             image_base64=element.image_base64,
         )

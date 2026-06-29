@@ -45,6 +45,8 @@ class HybridRetriever:
         retrieval_top_k: int | None = None,
         rerank_top_k: int | None = None,
         source_filter: str | None = None,
+        course: str | None = None,
+        week: int | None = None,
     ) -> list[dict]:
         """Run the full retrieval pipeline.
 
@@ -81,6 +83,8 @@ class HybridRetriever:
             sparse_vector=sparse,
             top_k=retrieval_top_k,
             source_filter=source_filter,
+            course=course,
+            week=week,
         )
         if not candidates:
             logger.warning("Vector search returned no candidates")

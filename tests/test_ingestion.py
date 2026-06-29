@@ -20,7 +20,7 @@ from unstructured.documents.elements import (
 )
 
 from src.ingestion.parser import parse_document
-from src.ingestion.validators import FileValidationError, validate_file
+from src.ingestion.validators import FileValidationError, validate_file, validate_indexable
 from src.schemas import ElementType
 
 
@@ -80,8 +80,8 @@ class TestValidator:
     def test_disallowed_extension_raises(self, tmp_path: Path) -> None:
         bad = tmp_path / "malware.exe"
         bad.write_bytes(b"MZ\x90\x00")
-        with pytest.raises(FileValidationError, match="not allowed"):
-            validate_file(bad)
+        with pytest.raises(FileValidationError, match="not indexable"):
+            validate_indexable(bad)
 
     def test_empty_file_raises(self, tmp_path: Path) -> None:
         empty = tmp_path / "empty.txt"

@@ -22,7 +22,7 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as qm
 
 from src.config import settings
-from src.schemas import Chunk, ElementType
+from src.schemas import Chunk
 from src.utils.logger import logger
 
 _DENSE_VEC = "dense"
@@ -105,6 +105,8 @@ class QdrantStore:
         sparse_vector: dict[int, float] | None = None,
         top_k: int | None = None,
         source_filter: str | None = None,
+        course: str | None = None,
+        week: int | None = None,
     ) -> list[dict]:
         """Hybrid search if sparse vector is given and enabled, else dense-only.
 
@@ -113,12 +115,16 @@ class QdrantStore:
             sparse_vector: token_id → weight map; required for hybrid.
             top_k: Number of results; defaults to settings.retrieval_top_k.
             source_filter: Optional file name to restrict results.
+            course: Optional course identifier to restrict results.
+            week: Optional week number to restrict results.
 
         Returns:
             List of dicts: {"chunk_id", "score", "payload"}.
         """
         top_k = top_k or settings.retrieval_top_k
-        qfilter = self._build_filter(source_filter)
+        qfilter = self._build_filter(
+            source_filter=source_filter, course=course, week=week
+        )
 
         use_hybrid = self._enable_sparse and sparse_vector is not None
         if use_hybrid:
@@ -167,6 +173,47 @@ class QdrantStore:
             for p in result.points
         ]
 
+    async def list_indexed_files(
+        self,
+        course: str | None = None,
+        week: int | None = None,
+    ) -> list[dict]:
+        """Return unique source files indexed for the given course/week.
+
+        Scrolls Qdrant with an optional course+week filter and deduplicates
+        by source_file. Returns list of {"source_file", "course", "week"}.
+        """
+        qfilter = self._build_filter(course=course, week=week)
+
+        seen: set[str] = set()
+        results: list[dict] = []
+        offset: Any = None
+
+        while True:
+            batch, next_offset = await asyncio.to_thread(
+                self._client.scroll,
+                collection_name=self._collection,
+                scroll_filter=qfilter,
+                limit=100,
+                offset=offset,
+                with_payload=["source_file", "course", "week"],
+                with_vectors=False,
+            )
+            for point in batch:
+                sf = (point.payload or {}).get("source_file")
+                if sf and sf not in seen:
+                    seen.add(sf)
+                    results.append({
+                        "source_file": sf,
+                        "course": (point.payload or {}).get("course"),
+                        "week": (point.payload or {}).get("week"),
+                    })
+            if next_offset is None:
+                break
+            offset = next_offset
+
+        return results
+
     async def delete_by_source(self, source_file: str) -> None:
         """Delete all chunks belonging to one source file."""
         await asyncio.to_thread(
@@ -186,17 +233,27 @@ class QdrantStore:
         logger.info("Deleted all chunks for source_file='{}'", source_file)
 
     @staticmethod
-    def _build_filter(source_filter: str | None) -> qm.Filter | None:
-        if not source_filter:
+    def _build_filter(
+        source_filter: str | None = None,
+        course: str | None = None,
+        week: int | None = None,
+    ) -> qm.Filter | None:
+        conditions: list[Any] = []
+        if source_filter:
+            conditions.append(
+                qm.FieldCondition(key="source_file", match=qm.MatchValue(value=source_filter))
+            )
+        if course:
+            conditions.append(
+                qm.FieldCondition(key="course", match=qm.MatchValue(value=course))
+            )
+        if week is not None:
+            conditions.append(
+                qm.FieldCondition(key="week", match=qm.MatchValue(value=week))
+            )
+        if not conditions:
             return None
-        return qm.Filter(
-            must=[
-                qm.FieldCondition(
-                    key="source_file",
-                    match=qm.MatchValue(value=source_filter),
-                )
-            ]
-        )
+        return qm.Filter(must=conditions)
 
     def _chunk_to_point(self, chunk: Chunk) -> qm.PointStruct:
         if chunk.dense_embedding is None:
@@ -221,6 +278,8 @@ class QdrantStore:
             "source_file": chunk.source_file,
             "page_number": chunk.page_number,
             "chunk_index": chunk.chunk_index,
+            "course": chunk.course,
+            "week": chunk.week,
             "raw_html": chunk.raw_html,
             "image_base64": chunk.image_base64,
         }

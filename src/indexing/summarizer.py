@@ -167,6 +167,7 @@ class MultimodalSummarizer:
         return await self._call_openai_vision(image_base64=cleaned, mime=mime)
 
     async def _call_groq(self, prompt: str) -> str:
+        response = None
         async for attempt in AsyncRetrying(
             retry=retry_if_exception_type(_GROQ_RETRY_ERRORS),
             stop=stop_after_attempt(3),
@@ -186,12 +187,14 @@ class MultimodalSummarizer:
                         raise  # Biarkan tenacity menangani retry
                     raise SummarizationError(f"Groq call failed: {exc}") from exc
 
+        assert response is not None
         content = (response.choices[0].message.content or "").strip()
         if not content:
             raise SummarizationError("Groq returned empty content")
         return content
 
     async def _call_openai_vision(self, image_base64: str, mime: str) -> str:
+        response = None
         async for attempt in AsyncRetrying(
             retry=retry_if_exception_type(_OAI_RETRY_ERRORS),
             stop=stop_after_attempt(3),
@@ -225,6 +228,7 @@ class MultimodalSummarizer:
                         raise  # Biarkan tenacity menangani retry
                     raise SummarizationError(f"OpenAI vision call failed: {exc}") from exc
 
+        assert response is not None
         content = (response.choices[0].message.content or "").strip()
         if not content:
             raise SummarizationError("OpenAI returned empty content")
