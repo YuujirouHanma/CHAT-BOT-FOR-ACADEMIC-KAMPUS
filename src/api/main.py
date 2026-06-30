@@ -7,9 +7,10 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from src.api.auth import verify_api_key
 from src.api.routes import batch, browse, chat, upload
 from src.config import settings
 from src.pipeline import RAGPipeline
@@ -45,10 +46,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(upload.router)
-app.include_router(batch.router)
-app.include_router(browse.router)
-app.include_router(chat.router)
+_auth = [Depends(verify_api_key)]
+app.include_router(upload.router, dependencies=_auth)
+app.include_router(batch.router, dependencies=_auth)
+app.include_router(browse.router, dependencies=_auth)
+app.include_router(chat.router, dependencies=_auth)
 
 
 @app.get("/health", tags=["meta"])

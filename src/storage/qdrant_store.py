@@ -105,8 +105,7 @@ class QdrantStore:
         sparse_vector: dict[int, float] | None = None,
         top_k: int | None = None,
         source_filter: str | None = None,
-        course: str | None = None,
-        week: int | None = None,
+        content_id: str | None = None,
     ) -> list[dict]:
         """Hybrid search if sparse vector is given and enabled, else dense-only.
 
@@ -115,15 +114,14 @@ class QdrantStore:
             sparse_vector: token_id → weight map; required for hybrid.
             top_k: Number of results; defaults to settings.retrieval_top_k.
             source_filter: Optional file name to restrict results.
-            course: Optional course identifier to restrict results.
-            week: Optional week number to restrict results.
+            content_id: Optional content identifier to restrict results.
 
         Returns:
             List of dicts: {"chunk_id", "score", "payload"}.
         """
         top_k = top_k or settings.retrieval_top_k
         qfilter = self._build_filter(
-            source_filter=source_filter, course=course, week=week
+            source_filter=source_filter, content_id=content_id
         )
 
         use_hybrid = self._enable_sparse and sparse_vector is not None
@@ -175,15 +173,14 @@ class QdrantStore:
 
     async def list_indexed_files(
         self,
-        course: str | None = None,
-        week: int | None = None,
+        content_id: str | None = None,
     ) -> list[dict]:
-        """Return unique source files indexed for the given course/week.
+        """Return unique source files indexed for the given content_id.
 
-        Scrolls Qdrant with an optional course+week filter and deduplicates
-        by source_file. Returns list of {"source_file", "course", "week"}.
+        Scrolls Qdrant with an optional content_id filter and deduplicates
+        by source_file. Returns list of {"source_file", "content_id"}.
         """
-        qfilter = self._build_filter(course=course, week=week)
+        qfilter = self._build_filter(content_id=content_id)
 
         seen: set[str] = set()
         results: list[dict] = []
@@ -196,7 +193,7 @@ class QdrantStore:
                 scroll_filter=qfilter,
                 limit=100,
                 offset=offset,
-                with_payload=["source_file", "course", "week"],
+                with_payload=["source_file", "content_id"],
                 with_vectors=False,
             )
             for point in batch:
@@ -205,8 +202,7 @@ class QdrantStore:
                     seen.add(sf)
                     results.append({
                         "source_file": sf,
-                        "course": (point.payload or {}).get("course"),
-                        "week": (point.payload or {}).get("week"),
+                        "content_id": (point.payload or {}).get("content_id"),
                     })
             if next_offset is None:
                 break
@@ -235,21 +231,16 @@ class QdrantStore:
     @staticmethod
     def _build_filter(
         source_filter: str | None = None,
-        course: str | None = None,
-        week: int | None = None,
+        content_id: str | None = None,
     ) -> qm.Filter | None:
         conditions: list[Any] = []
         if source_filter:
             conditions.append(
                 qm.FieldCondition(key="source_file", match=qm.MatchValue(value=source_filter))
             )
-        if course:
+        if content_id:
             conditions.append(
-                qm.FieldCondition(key="course", match=qm.MatchValue(value=course))
-            )
-        if week is not None:
-            conditions.append(
-                qm.FieldCondition(key="week", match=qm.MatchValue(value=week))
+                qm.FieldCondition(key="content_id", match=qm.MatchValue(value=content_id))
             )
         if not conditions:
             return None
@@ -278,8 +269,7 @@ class QdrantStore:
             "source_file": chunk.source_file,
             "page_number": chunk.page_number,
             "chunk_index": chunk.chunk_index,
-            "course": chunk.course,
-            "week": chunk.week,
+            "content_id": chunk.content_id,
             "raw_html": chunk.raw_html,
             "image_base64": chunk.image_base64,
         }

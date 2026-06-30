@@ -1,7 +1,8 @@
 """Multimodal summarization for table HTML and image base64 payloads.
 
-Tables go to Groq Llama 3.1 (fast, cheap, good with structured text).
-Images go to OpenAI GPT-4o mini vision (best price/quality for academic content).
+Tables and images both go through the single active generation model
+(GENERATION_PROVIDER/GENERATION_MODEL in .env) — same client as chat
+generation, so the whole pipeline runs on one model.
 Text elements pass through unchanged — their content is already embeddable.
 
 Public API:
@@ -16,49 +17,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-class _DummyRetryableError(Exception):
-    pass
-
-if TYPE_CHECKING:
-    from groq import AsyncGroq
-    from groq import APIConnectionError as GroqConnError
-    from groq import APITimeoutError as GroqTimeoutError
-    from groq import InternalServerError as GroqServerError
-    from groq import RateLimitError as GroqRateLimit
-    from openai import AsyncOpenAI
-    from openai import APIConnectionError as OAIConnError
-    from openai import APITimeoutError as OAITimeoutError
-    from openai import InternalServerError as OAIServerError
-    from openai import RateLimitError as OAIRateLimit
-else:
-    try:
-        from groq import AsyncGroq
-        from groq import APIConnectionError as GroqConnError
-        from groq import APITimeoutError as GroqTimeoutError
-        from groq import InternalServerError as GroqServerError
-        from groq import RateLimitError as GroqRateLimit
-    except ImportError:  # pragma: no cover - runtime should have package installed
-        AsyncGroq = Any
-        GroqConnError = _DummyRetryableError
-        GroqTimeoutError = _DummyRetryableError
-        GroqServerError = _DummyRetryableError
-        GroqRateLimit = _DummyRetryableError
-
-    try:
-        from openai import AsyncOpenAI
-        from openai import APIConnectionError as OAIConnError
-        from openai import APITimeoutError as OAITimeoutError
-        from openai import InternalServerError as OAIServerError
-        from openai import RateLimitError as OAIRateLimit
-    except ImportError:  # pragma: no cover - runtime should have package installed
-        AsyncOpenAI = Any
-        OAIConnError = _DummyRetryableError
-        OAITimeoutError = _DummyRetryableError
-        OAIServerError = _DummyRetryableError
-        OAIRateLimit = _DummyRetryableError
-
+from openai import APIConnectionError as OAIConnError
+from openai import APITimeoutError as OAITimeoutError
+from openai import AsyncOpenAI
+from openai import InternalServerError as OAIServerError
+from openai import RateLimitError as OAIRateLimit
 from tenacity import (
     AsyncRetrying,
     retry_if_exception_type,
@@ -104,13 +69,7 @@ Fokus pada:
 Tujuan: deskripsi ini akan dipakai untuk mencari gambar dengan query mahasiswa."""
 
 
-_GROQ_RETRY_ERRORS: tuple[type[Exception], ...] = (
-    GroqConnError,
-    GroqTimeoutError,
-    GroqServerError,
-    GroqRateLimit,
-)
-_OAI_RETRY_ERRORS: tuple[type[Exception], ...] = (
+_RETRYABLE: tuple[type[Exception], ...] = (
     OAIConnError,
     OAITimeoutError,
     OAIServerError,
@@ -123,115 +82,73 @@ class SummarizationError(RuntimeError):
 
 
 class MultimodalSummarizer:
-    """Async summarizer wrapping Groq (text/tables) and OpenAI (images).
+    """Async summarizer for tables and images, both via the active generation model.
 
-    Construct once per pipeline run; both SDK clients are reusable across calls.
+    Construct once per pipeline run; the SDK client is reusable across calls.
     """
 
-    def __init__(
-        self,
-        groq_client: AsyncGroq | None = None,
-        openai_client: AsyncOpenAI | None = None,
-    ) -> None:
-        # Get Groq API key safely
-        groq_key_obj: Any = settings.groq_api_key
-        if hasattr(groq_key_obj, "get_secret_value"):
-            groq_key = groq_key_obj.get_secret_value()
-        else:
-            groq_key = str(groq_key_obj)
-        
-        self._groq = groq_client or AsyncGroq(api_key=groq_key)
-        
-        # Get OpenAI API key safely
-        openai_key_obj: Any = settings.openai_api_key
-        if hasattr(openai_key_obj, "get_secret_value"):
-            openai_key = openai_key_obj.get_secret_value()
-        else:
-            openai_key = str(openai_key_obj)
-        
-        self._openai = openai_client or AsyncOpenAI(api_key=openai_key)
+    def __init__(self, client: AsyncOpenAI | None = None) -> None:
+        self._client = client or AsyncOpenAI(
+            api_key=settings.generation_api_key,
+            base_url=settings.generation_base_url,
+        )
 
     async def summarize_table(self, table_html: str) -> str:
         cleaned = (table_html or "").strip()
         if not cleaned:
             raise ValueError("Empty table HTML")
-        return await self._call_groq(
-            prompt=_TABLE_SUMMARY_PROMPT.format(table_html=cleaned)
-        )
+        messages: list[Any] = [
+            {"role": "user", "content": _TABLE_SUMMARY_PROMPT.format(table_html=cleaned)}
+        ]
+        return await self._call(messages)
 
     async def describe_image(self, image_base64: str) -> str:
         cleaned = (image_base64 or "").strip()
         if not cleaned:
             raise ValueError("Empty image base64")
         mime = detect_image_mime(cleaned)
-        return await self._call_openai_vision(image_base64=cleaned, mime=mime)
+        messages: list[Any] = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _IMAGE_DESCRIPTION_PROMPT},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:{mime};base64,{cleaned}",
+                            "detail": "low",
+                        },
+                    },
+                ],
+            }
+        ]
+        return await self._call(messages)
 
-    async def _call_groq(self, prompt: str) -> str:
+    async def _call(self, messages: list[Any]) -> str:
         response = None
         async for attempt in AsyncRetrying(
-            retry=retry_if_exception_type(_GROQ_RETRY_ERRORS),
+            retry=retry_if_exception_type(_RETRYABLE),
             stop=stop_after_attempt(3),
             wait=wait_exponential(multiplier=1, min=1, max=8),
             reraise=True,
         ):
             with attempt:
                 try:
-                    response = await self._groq.chat.completions.create(  # type: ignore[union-attr,call-arg]
-                        model=settings.groq_summary_model,
-                        messages=[{"role": "user", "content": prompt}],
+                    response = await self._client.chat.completions.create(
+                        model=settings.generation_model,
+                        messages=messages,
                         temperature=0.2,
                         max_tokens=512,
                     )
                 except Exception as exc:
-                    if isinstance(exc, _GROQ_RETRY_ERRORS):
+                    if isinstance(exc, _RETRYABLE):
                         raise  # Biarkan tenacity menangani retry
-                    raise SummarizationError(f"Groq call failed: {exc}") from exc
+                    raise SummarizationError(f"Summarization call failed: {exc}") from exc
 
         assert response is not None
         content = (response.choices[0].message.content or "").strip()
         if not content:
-            raise SummarizationError("Groq returned empty content")
-        return content
-
-    async def _call_openai_vision(self, image_base64: str, mime: str) -> str:
-        response = None
-        async for attempt in AsyncRetrying(
-            retry=retry_if_exception_type(_OAI_RETRY_ERRORS),
-            stop=stop_after_attempt(3),
-            wait=wait_exponential(multiplier=1, min=1, max=8),
-            reraise=True,
-        ):
-            with attempt:
-                try:
-                    response = await self._openai.chat.completions.create(  # type: ignore[union-attr,call-arg]
-                        model=settings.openai_vision_model,
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "text", "text": _IMAGE_DESCRIPTION_PROMPT},
-                                    {
-                                        "type": "image_url",
-                                        "image_url": {
-                                            "url": f"data:{mime};base64,{image_base64}",
-                                            "detail": "low",
-                                        },
-                                    },
-                                ],
-                            }
-                        ],
-                        temperature=0.2,
-                        max_tokens=512,
-                    )
-                except Exception as exc:
-                    if isinstance(exc, _OAI_RETRY_ERRORS):
-                        raise  # Biarkan tenacity menangani retry
-                    raise SummarizationError(f"OpenAI vision call failed: {exc}") from exc
-
-        assert response is not None
-        content = (response.choices[0].message.content or "").strip()
-        if not content:
-            raise SummarizationError("OpenAI returned empty content")
+            raise SummarizationError("Model returned empty content")
         return content
 
 

@@ -29,15 +29,13 @@ _PDF_EXTENSIONS = {"pdf"}
 
 def parse_document(
     file_path: Path,
-    course: str | None = None,
-    week: int | None = None,
+    content_id: str | None = None,
 ) -> list[ParsedElement]:
     """Parse a document into a list of ParsedElement.
 
     Args:
         file_path: Path to the file on disk.
-        course: Course identifier to stamp on every element.
-        week: Week number to stamp on every element.
+        content_id: Content identifier to stamp on every element.
     """
     validate_indexable(file_path)
     logger.info("Parsing document: {}", file_path.name)
@@ -55,8 +53,7 @@ def parse_document(
     parsed = _assemble_elements(
         elements,
         source_file=file_path.name,
-        course=course,
-        week=week,
+        content_id=content_id,
     )
 
     counts = _count_by_type(parsed)
@@ -87,8 +84,7 @@ def _build_partition_kwargs(file_path: Path) -> dict[str, Any]:
 def _assemble_elements(
     elements: list[Element],
     source_file: str,
-    course: str | None = None,
-    week: int | None = None,
+    content_id: str | None = None,
 ) -> list[ParsedElement]:
     parsed: list[ParsedElement] = []
     text_buffer: list[str] = []
@@ -99,7 +95,7 @@ def _assemble_elements(
         if not text_buffer:
             return
         parsed.append(
-            _make_text_element(text_buffer, source_file, buffer_page, course, week)
+            _make_text_element(text_buffer, source_file, buffer_page, content_id)
         )
         text_buffer = []
         buffer_page = None
@@ -109,12 +105,12 @@ def _assemble_elements(
 
         if isinstance(el, UTable):
             flush_text()
-            parsed.append(_make_table_element(el, source_file, page, course, week))
+            parsed.append(_make_table_element(el, source_file, page, content_id))
             continue
 
         if isinstance(el, UImage):
             flush_text()
-            img = _make_image_element(el, source_file, page, course, week)
+            img = _make_image_element(el, source_file, page, content_id)
             if img is not None:
                 parsed.append(img)
             continue
@@ -138,7 +134,7 @@ def _page_number_of(element: Element) -> int | None:
 
 def _make_text_element(
     buffer: list[str], source_file: str, page_number: int | None,
-    course: str | None, week: int | None,
+    content_id: str | None,
 ) -> ParsedElement:
     return ParsedElement(
         element_id=str(uuid.uuid4()),
@@ -146,14 +142,13 @@ def _make_text_element(
         content="\n\n".join(buffer),
         source_file=source_file,
         page_number=page_number,
-        course=course,
-        week=week,
+        content_id=content_id,
     )
 
 
 def _make_table_element(
     table: UTable, source_file: str, page_number: int | None,
-    course: str | None, week: int | None,
+    content_id: str | None,
 ) -> ParsedElement:
     raw_html: str | None = None
     metadata = getattr(table, "metadata", None)
@@ -167,14 +162,13 @@ def _make_table_element(
         raw_html=raw_html,
         source_file=source_file,
         page_number=page_number,
-        course=course,
-        week=week,
+        content_id=content_id,
     )
 
 
 def _make_image_element(
     image: UImage, source_file: str, page_number: int | None,
-    course: str | None, week: int | None,
+    content_id: str | None,
 ) -> ParsedElement | None:
     metadata = getattr(image, "metadata", None)
     image_base64: str | None = None
@@ -195,8 +189,7 @@ def _make_image_element(
         image_base64=image_base64,
         source_file=source_file,
         page_number=page_number,
-        course=course,
-        week=week,
+        content_id=content_id,
     )
 
 

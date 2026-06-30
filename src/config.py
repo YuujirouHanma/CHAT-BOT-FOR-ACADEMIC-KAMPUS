@@ -23,21 +23,21 @@ class Settings(BaseSettings):
     app_env: Literal["development", "production", "test"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
+    # --- Inbound API auth (for other services calling this API, e.g. tim BE) ---
+    ragacademic_api_key: SecretStr = SecretStr("")
+
     # --- API keys ---
     openai_api_key: SecretStr = SecretStr("")
     groq_api_key: SecretStr = SecretStr("")
     hf_api_key: SecretStr = SecretStr("")
+    openrouter_api_key: SecretStr = SecretStr("")
 
     # --- Generation LLM ---
-    generation_provider: Literal["openai", "groq", "huggingface", "ollama"] = "huggingface"
+    generation_provider: Literal["openai", "groq", "huggingface", "ollama", "openrouter"] = "huggingface"
     generation_model: str = "Qwen/Qwen3.5-9B"
     generation_base_url: str | None = None
     generation_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
     generation_max_tokens: int = Field(default=1024, ge=64, le=16384)
-
-    # --- Summarization ---
-    groq_summary_model: str = "llama-3.1-8b-instant"
-    openai_vision_model: str = "gpt-4o-mini"
 
     # --- Embedding ---
     embed_model: str = "BAAI/bge-m3"
@@ -97,6 +97,7 @@ class Settings(BaseSettings):
                 "groq": "https://api.groq.com/openai/v1",
                 "huggingface": "https://router.huggingface.co/featherless-ai/v1",
                 "ollama": "http://localhost:11434/v1",
+                "openrouter": "https://openrouter.ai/api/v1",
             }
             self.generation_base_url = urls[self.generation_provider]
         return self
@@ -110,6 +111,8 @@ class Settings(BaseSettings):
             return self.openai_api_key.get_secret_value()
         if self.generation_provider == "groq":
             return self.groq_api_key.get_secret_value()
+        if self.generation_provider == "openrouter":
+            return self.openrouter_api_key.get_secret_value()
         return self.hf_api_key.get_secret_value()
 
     @property

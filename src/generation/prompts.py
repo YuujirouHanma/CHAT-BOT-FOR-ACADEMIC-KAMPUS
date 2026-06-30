@@ -9,6 +9,8 @@ Each retrieved chunk becomes a `[Sumber N]` block the LLM can cite.
 """
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -21,13 +23,7 @@ SYSTEM_PROMPT = """Anda adalah asisten pembelajaran untuk mahasiswa. Tugas Anda:
 3. Untuk pertanyaan yang melibatkan tabel atau gambar, baca data mentah yang disertakan dan kutip angka secara presisi.
 4. Sebutkan sumber di setiap klaim penting dengan format [Sumber N], di mana N adalah nomor sumber yang Anda kutip.
 5. Gunakan bahasa Indonesia yang jelas dan akademis. Jangan mengulang pertanyaan.
-6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat.
-7. Di akhir setiap jawaban, tambahkan tepat 3 rekomendasi pertanyaan lanjutan yang relevan dengan format:
-
-PERTANYAAN_LANJUTAN:
-- [pertanyaan 1]
-- [pertanyaan 2]
-- [pertanyaan 3]"""
+6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat."""
 
 
 USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
@@ -36,7 +32,31 @@ USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
 PERTANYAAN MAHASISWA:
 {question}
 
-JAWABAN (sertakan [Sumber N] untuk setiap klaim, lalu tambahkan PERTANYAAN_LANJUTAN di akhir):"""
+JAWABAN (sertakan [Sumber N] untuk setiap klaim):"""
+
+
+# --- Stage 1: Query decomposition (enrich query before retrieval) ---
+DECOMPOSE_SYSTEM_PROMPT = (
+    "Anda adalah asisten akademik. Diberikan sebuah pertanyaan dari mahasiswa, "
+    "uraikan pertanyaan tersebut menjadi komponen terstruktur berikut (jawab dalam JSON):\n"
+    "{\n"
+    '  "topik_utama": "<topik atau materi yang paling relevan>",\n'
+    '  "konsep_kunci": ["<konsep 1>", "<konsep 2>", ...],\n'
+    '  "tipe_pertanyaan": "<definisi | penjelasan | contoh | perhitungan | perbandingan | lainnya>",\n'
+    '  "query_diperkaya": "<versi pertanyaan yang lebih eksplisit dan informatif untuk pencarian materi>"\n'
+    "}\n"
+    "Jawab HANYA dengan JSON valid. Jangan coba menjawab pertanyaannya."
+)
+
+
+# --- Stage 5: Follow-up question generation (separate from the main answer) ---
+FOLLOWUP_SYSTEM_PROMPT = (
+    "Anda adalah tutor yang membuat pertanyaan lanjutan untuk membantu mahasiswa belajar. "
+    "Buat tepat 3 pertanyaan lanjutan yang relevan dengan pertanyaan awal dan jawaban final. "
+    "Pertanyaan harus singkat, natural, dan mendorong pemahaman lebih dalam. "
+    "Jawab HANYA dalam JSON valid berbentuk array string, tanpa markdown, tanpa penjelasan. "
+    'Contoh: ["Pertanyaan 1?", "Pertanyaan 2?", "Pertanyaan 3?"]'
+)
 
 
 @dataclass(frozen=True)
@@ -111,16 +131,47 @@ def build_user_prompt(question: str, context: FormattedContext) -> str:
     )
 
 
-def parse_answer_and_suggestions(raw: str) -> tuple[str, list[str]]:
-    """Split LLM output into answer text and suggested follow-up questions."""
-    marker = "PERTANYAAN_LANJUTAN:"
-    if marker not in raw:
-        return raw.strip(), []
+def parse_decompose_json(raw: str, fallback_question: str) -> dict[str, Any]:
+    """Parse Stage 1 decomposition output. Falls back to the raw question on failure."""
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        data = json.loads(clean)
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {
+        "topik_utama": fallback_question,
+        "konsep_kunci": [fallback_question],
+        "tipe_pertanyaan": "lainnya",
+        "query_diperkaya": fallback_question,
+    }
 
-    answer_part, suggestions_part = raw.split(marker, 1)
-    suggestions = [
-        line.lstrip("-•*0123456789. ").strip()
-        for line in suggestions_part.splitlines()
-        if line.strip() and line.strip() not in ("-", "•", "*")
-    ]
-    return answer_part.strip(), [s for s in suggestions if s][:3]
+
+def parse_followup_json(raw: str) -> list[str]:
+    """Parse Stage 5 follow-up output into a list of up to 3 questions."""
+    clean = raw.replace("```json", "").replace("```", "").strip()
+
+    suggestions: list[str] = []
+    try:
+        data = json.loads(clean)
+        if isinstance(data, list):
+            suggestions = [str(x).strip() for x in data if str(x).strip()]
+    except Exception:
+        match = re.search(r"\[[\s\S]*\]", clean)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+                if isinstance(data, list):
+                    suggestions = [str(x).strip() for x in data if str(x).strip()]
+            except Exception:
+                pass
+
+    if not suggestions:
+        suggestions = [
+            re.sub(r"^\s*[\-\d\.\)\]]+\s*", "", line).strip()
+            for line in clean.splitlines()
+            if line.strip()
+        ]
+
+    return [s for s in suggestions if s][:3]

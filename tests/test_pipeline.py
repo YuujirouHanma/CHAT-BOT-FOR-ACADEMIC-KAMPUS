@@ -53,6 +53,8 @@ def _make_pipeline() -> tuple[RAGPipeline, dict]:
     reranker = AsyncMock()
     generator = AsyncMock()
     generator.generate = AsyncMock(return_value="Jawaban final.")
+    generator.decompose_query = AsyncMock(return_value={})
+    generator.generate_followup = AsyncMock(return_value=[])
 
     pipeline = RAGPipeline(
         summarizer=summarizer,
@@ -194,7 +196,7 @@ class TestQuery:
         await pipeline.query("q", source_filter="specific.pdf")
 
         retrieve_mock.assert_awaited_once_with(
-            query="q", source_filter="specific.pdf"
+            query="q", content_id=None, source_filter="specific.pdf"
         )
 
     @pytest.mark.asyncio

@@ -1,0 +1,794 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "RAGAcademic",
+    "description": "Multimodal RAG chatbot untuk materi kuliah",
+    "version": "0.3.0"
+  },
+  "paths": {
+    "/documents/upload": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Upload Document",
+        "description": "Upload a document, save to storage/{content_id}/, and index.\n\nIf content_id given → saved under storage/{content_id}/{filename}.\nOtherwise → saved to data/uploads/ with UUID prefix.",
+        "operationId": "upload_document_documents_upload_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_document_documents_upload_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndexResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/documents/index-batch": {
+      "post": {
+        "tags": [
+          "documents"
+        ],
+        "summary": "Index Batch",
+        "description": "Index all indexable documents in storage/{content_id}/.\n\nNon-indexable files (video, audio, images) are silently skipped.",
+        "operationId": "index_batch_documents_index_batch_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BatchIndexRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BatchIndexSummary"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/browse/contents": {
+      "get": {
+        "tags": [
+          "browse"
+        ],
+        "summary": "Get Contents",
+        "operationId": "get_contents_browse_contents_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContentListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/browse/contents/{content_id}/files": {
+      "get": {
+        "tags": [
+          "browse"
+        ],
+        "summary": "Get Files",
+        "description": "List ALL files for a content_id — documents, videos, audio, etc.\nDocuments get an `indexed` flag from Qdrant.",
+        "operationId": "get_files_browse_contents__content_id__files_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Content Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/chat/ask": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Ask Question",
+        "operationId": "ask_question_chat_ask_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QueryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QueryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/chat/feedback": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Submit Feedback",
+        "operationId": "submit_feedback_chat_feedback_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FeedbackRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "meta"
+        ],
+        "summary": "Health",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "type": "object",
+                  "title": "Response Health Health Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "BatchFileResult": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "chunks_created": {
+            "type": "integer",
+            "title": "Chunks Created"
+          },
+          "points_stored": {
+            "type": "integer",
+            "title": "Points Stored"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          }
+        },
+        "type": "object",
+        "required": [
+          "filename",
+          "content_id",
+          "chunks_created",
+          "points_stored",
+          "status"
+        ],
+        "title": "BatchFileResult"
+      },
+      "BatchIndexRequest": {
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_id"
+        ],
+        "title": "BatchIndexRequest"
+      },
+      "BatchIndexSummary": {
+        "properties": {
+          "total_files": {
+            "type": "integer",
+            "title": "Total Files"
+          },
+          "indexed": {
+            "type": "integer",
+            "title": "Indexed"
+          },
+          "skipped": {
+            "type": "integer",
+            "title": "Skipped"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Errors"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/BatchFileResult"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_files",
+          "indexed",
+          "skipped",
+          "errors",
+          "results"
+        ],
+        "title": "BatchIndexSummary"
+      },
+      "Body_upload_document_documents_upload_post": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "format": "binary",
+            "title": "File"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_document_documents_upload_post"
+      },
+      "ContentListResponse": {
+        "properties": {
+          "contents": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Contents"
+          }
+        },
+        "type": "object",
+        "required": [
+          "contents"
+        ],
+        "title": "ContentListResponse"
+      },
+      "FeedbackRequest": {
+        "properties": {
+          "interaction_id": {
+            "type": "string",
+            "title": "Interaction Id"
+          },
+          "rating": {
+            "type": "string",
+            "enum": [
+              "membantu",
+              "cukup",
+              "tidak_membantu"
+            ],
+            "title": "Rating"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Issues"
+          },
+          "comment": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 1000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Comment"
+          }
+        },
+        "type": "object",
+        "required": [
+          "interaction_id",
+          "rating"
+        ],
+        "title": "FeedbackRequest"
+      },
+      "FileInfo": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "title": "Size Bytes"
+          },
+          "size_display": {
+            "type": "string",
+            "title": "Size Display"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "is_indexable": {
+            "type": "boolean",
+            "title": "Is Indexable"
+          },
+          "indexed": {
+            "type": "boolean",
+            "title": "Indexed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "filename",
+          "content_id",
+          "size_bytes",
+          "size_display",
+          "category",
+          "is_indexable",
+          "indexed"
+        ],
+        "title": "FileInfo"
+      },
+      "FileListResponse": {
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/FileInfo"
+            },
+            "type": "array",
+            "title": "Files"
+          },
+          "total_files": {
+            "type": "integer",
+            "title": "Total Files"
+          },
+          "total_indexable": {
+            "type": "integer",
+            "title": "Total Indexable"
+          },
+          "total_indexed": {
+            "type": "integer",
+            "title": "Total Indexed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_id",
+          "files",
+          "total_files",
+          "total_indexable",
+          "total_indexed"
+        ],
+        "title": "FileListResponse"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "IndexResponse": {
+        "properties": {
+          "source_file": {
+            "type": "string",
+            "title": "Source File"
+          },
+          "elements_parsed": {
+            "type": "integer",
+            "title": "Elements Parsed"
+          },
+          "chunks_created": {
+            "type": "integer",
+            "title": "Chunks Created"
+          },
+          "points_stored": {
+            "type": "integer",
+            "title": "Points Stored"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_file",
+          "elements_parsed",
+          "chunks_created",
+          "points_stored",
+          "content_id"
+        ],
+        "title": "IndexResponse"
+      },
+      "QueryRequest": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Question"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "source_filter": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Filter"
+          }
+        },
+        "type": "object",
+        "required": [
+          "question"
+        ],
+        "title": "QueryRequest"
+      },
+      "QueryResponse": {
+        "properties": {
+          "answer": {
+            "type": "string",
+            "title": "Answer"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInfo"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "recommendations": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Recommendations"
+          },
+          "session_id": {
+            "type": "string",
+            "title": "Session Id"
+          },
+          "interaction_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Interaction Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "answer",
+          "sources",
+          "recommendations",
+          "session_id"
+        ],
+        "title": "QueryResponse"
+      },
+      "SourceInfo": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "source_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source File"
+          },
+          "page_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Number"
+          },
+          "element_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Element Type"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "rerank_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rerank Score"
+          }
+        },
+        "type": "object",
+        "required": [
+          "index"
+        ],
+        "title": "SourceInfo"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "APIKeyHeader": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    }
+  }
+}

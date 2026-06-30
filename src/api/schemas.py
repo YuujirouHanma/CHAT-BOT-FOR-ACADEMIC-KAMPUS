@@ -1,6 +1,8 @@
 """API request and response schemas."""
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -8,8 +10,7 @@ from pydantic import BaseModel, Field
 class QueryRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     session_id: str | None = None
-    course: str | None = None
-    week: int | None = None
+    content_id: str | None = None
     source_filter: str | None = Field(default=None, max_length=255)
 
 
@@ -18,8 +19,7 @@ class SourceInfo(BaseModel):
     source_file: str | None = None
     page_number: int | None = None
     element_type: str | None = None
-    course: str | None = None
-    week: int | None = None
+    content_id: str | None = None
     rerank_score: float | None = None
 
 
@@ -28,6 +28,14 @@ class QueryResponse(BaseModel):
     sources: list[SourceInfo]
     recommendations: list[str]
     session_id: str
+    interaction_id: str | None = None
+
+
+class FeedbackRequest(BaseModel):
+    interaction_id: str
+    rating: Literal["membantu", "cukup", "tidak_membantu"]
+    issues: list[str] = Field(default_factory=list)
+    comment: str | None = Field(default=None, max_length=1000)
 
 
 # --- Upload / Indexing ---
@@ -36,24 +44,17 @@ class IndexResponse(BaseModel):
     elements_parsed: int
     chunks_created: int
     points_stored: int
-    course: str | None
-    week: int | None
+    content_id: str | None
 
 
 # --- Browse ---
-class CourseListResponse(BaseModel):
-    courses: list[str]
-
-
-class WeekListResponse(BaseModel):
-    course: str
-    weeks: list[int]
+class ContentListResponse(BaseModel):
+    contents: list[str]
 
 
 class FileInfo(BaseModel):
     filename: str
-    course: str
-    week: int
+    content_id: str
     size_bytes: int
     size_display: str
     category: str          # document, video, audio, image, other
@@ -62,8 +63,7 @@ class FileInfo(BaseModel):
 
 
 class FileListResponse(BaseModel):
-    course: str
-    week: int
+    content_id: str
     files: list[FileInfo]
     total_files: int
     total_indexable: int
@@ -72,14 +72,12 @@ class FileListResponse(BaseModel):
 
 # --- Batch ---
 class BatchIndexRequest(BaseModel):
-    course: str
-    week: int | None = None
+    content_id: str
 
 
 class BatchFileResult(BaseModel):
     filename: str
-    course: str
-    week: int
+    content_id: str
     chunks_created: int
     points_stored: int
     status: str

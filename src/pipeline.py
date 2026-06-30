@@ -5,11 +5,13 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from src.generation.llm import LLMGenerator
-from src.generation.prompts import format_retrieval_results, parse_answer_and_suggestions
+from src.generation.prompts import format_retrieval_results
+from src.hitl.logger import log_interaction
 from src.indexing.chunker import Chunker
 from src.indexing.embedder import Embedder
 from src.indexing.summarizer import MultimodalSummarizer, enrich_elements
@@ -26,8 +28,7 @@ class IndexResult:
     elements_parsed: int
     chunks_created: int
     points_stored: int
-    course: str | None = None
-    week: int | None = None
+    content_id: str | None = None
 
 
 @dataclass
@@ -35,6 +36,8 @@ class QueryResult:
     answer: str
     sources: list[dict]
     recommendations: list[str]
+    interaction_id: str | None = None
+    decomposition: dict = field(default_factory=dict)
 
 
 class RAGPipeline:
@@ -61,18 +64,18 @@ class RAGPipeline:
         await self._store.ensure_collection()
 
     async def index_document(
-        self, file_path: Path, course: str | None = None, week: int | None = None,
+        self, file_path: Path, content_id: str | None = None,
     ) -> IndexResult:
-        logger.info("=== Indexing {} (course={}, week={}) ===", file_path.name, course, week)
+        logger.info("=== Indexing {} (content_id={}) ===", file_path.name, content_id)
 
-        elements = parse_document(file_path, course=course, week=week)
+        elements = parse_document(file_path, content_id=content_id)
         if not elements:
-            return IndexResult(file_path.name, 0, 0, 0, course=course, week=week)
+            return IndexResult(file_path.name, 0, 0, 0, content_id=content_id)
 
         enriched = await enrich_elements(elements, self._summarizer)
         chunks = self._chunker.chunk(enriched)
         if not chunks:
-            return IndexResult(file_path.name, len(elements), 0, 0, course=course, week=week)
+            return IndexResult(file_path.name, len(elements), 0, 0, content_id=content_id)
 
         embedded = await self._embedder.embed_chunks(chunks)
         stored = await self._store.upsert_chunks(embedded)
@@ -84,32 +87,43 @@ class RAGPipeline:
             elements_parsed=len(elements),
             chunks_created=len(chunks),
             points_stored=stored,
-            course=course,
-            week=week,
+            content_id=content_id,
         )
 
     async def query(
         self,
         question: str,
-        course: str | None = None,
-        week: int | None = None,
+        content_id: str | None = None,
         source_filter: str | None = None,
+        session_id: str | None = None,
     ) -> QueryResult:
-        logger.info("=== Query: '{}' (course={}, week={}) ===", question[:80], course, week)
+        logger.info("=== Query: '{}' (content_id={}) ===", question[:80], content_id)
+        start = time.monotonic()
 
+        # Stage 1: decompose the question into an enriched, more searchable query.
+        dq = await self._generator.decompose_query(question)
+        enriched_query = dq.get("query_diperkaya") or question
+
+        # Stage 2: retrieve using the enriched query.
         results = await self._retriever.retrieve(
-            query=question, course=course, week=week, source_filter=source_filter,
+            query=enriched_query, content_id=content_id, source_filter=source_filter,
         )
         if not results:
-            return QueryResult(
+            result = QueryResult(
                 answer="Materi yang tersedia tidak mencakup informasi tersebut.",
                 sources=[],
                 recommendations=[],
+                decomposition=dq,
             )
+            result.interaction_id = log_interaction(
+                question=question, dq=dq, answer=result.answer, sources=[],
+                recommendations=[], elapsed_seconds=time.monotonic() - start,
+                content_id=content_id, session_id=session_id,
+            )
+            return result
 
         context = format_retrieval_results(results)
-        raw_answer = await self._generator.generate(question, context)
-        answer, recommendations = parse_answer_and_suggestions(raw_answer)
+        answer = await self._generator.generate(question, context)
 
         sources = [
             {
@@ -117,10 +131,21 @@ class RAGPipeline:
                 "source_file": (r.get("payload") or {}).get("source_file"),
                 "page_number": (r.get("payload") or {}).get("page_number"),
                 "element_type": (r.get("payload") or {}).get("element_type"),
-                "course": (r.get("payload") or {}).get("course"),
-                "week": (r.get("payload") or {}).get("week"),
+                "content_id": (r.get("payload") or {}).get("content_id"),
                 "rerank_score": r.get("rerank_score"),
             }
             for idx, r in enumerate(results)
         ]
-        return QueryResult(answer=answer, sources=sources, recommendations=recommendations)
+
+        # Stage 5: generate follow-up questions as a separate call from the main answer.
+        recommendations = await self._generator.generate_followup(question, dq, answer)
+
+        interaction_id = log_interaction(
+            question=question, dq=dq, answer=answer, sources=sources,
+            recommendations=recommendations, elapsed_seconds=time.monotonic() - start,
+            content_id=content_id, session_id=session_id,
+        )
+        return QueryResult(
+            answer=answer, sources=sources, recommendations=recommendations,
+            interaction_id=interaction_id, decomposition=dq,
+        )

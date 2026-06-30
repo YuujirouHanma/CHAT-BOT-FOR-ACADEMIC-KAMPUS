@@ -32,8 +32,7 @@ class ParsedElement(BaseModel):
 
     source_file: str
     page_number: int | None = None
-    course: str | None = None
-    week: int | None = None
+    content_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     def embeddable_text(self) -> str:
@@ -57,8 +56,7 @@ class Chunk(BaseModel):
     source_file: str
     page_number: int | None = None
     chunk_index: int = 0
-    course: str | None = None
-    week: int | None = None
+    content_id: str | None = None
 
     raw_html: str | None = None
     image_base64: str | None = None

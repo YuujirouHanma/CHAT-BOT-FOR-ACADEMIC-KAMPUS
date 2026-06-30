@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
+from src.api.auth import verify_api_key
 from src.api.dependencies import get_pipeline
 from src.api.main import app
 from src.pipeline import IndexResult, QueryResult
@@ -44,6 +45,7 @@ def _make_pipeline_mock() -> AsyncMock:
                     "rerank_score": 0.92,
                 }
             ],
+            recommendations=["Pertanyaan lanjutan?"],
         )
     )
     return pipeline
@@ -55,6 +57,7 @@ def client() -> Generator[_TestClient, None, None]:
     The pipeline is provided via dependency_overrides instead."""
     mock_pipeline = _make_pipeline_mock()
     app.dependency_overrides[get_pipeline] = lambda: mock_pipeline
+    app.dependency_overrides[verify_api_key] = lambda: None
     c = _TestClient(app)
     c.mock_pipeline = mock_pipeline
     yield c
@@ -65,7 +68,7 @@ class TestHealth:
     def test_health_returns_ok(self, client: TestClient) -> None:
         response = client.get("/health")
         assert response.status_code == 200
-        assert response.json() == {"status": "ok"}
+        assert response.json()["status"] == "ok"
 
 
 class TestUploadEndpoint:

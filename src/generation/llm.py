@@ -22,9 +22,13 @@ from tenacity import (
 
 from src.config import settings
 from src.generation.prompts import (
+    DECOMPOSE_SYSTEM_PROMPT,
+    FOLLOWUP_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     FormattedContext,
     build_user_prompt,
+    parse_decompose_json,
+    parse_followup_json,
 )
 from src.utils.logger import logger
 
@@ -87,6 +91,40 @@ class LLMGenerator:
 
         return await self._call_with_retry(messages)
 
+    async def decompose_query(self, question: str) -> dict[str, Any]:
+        """Stage 1: enrich the raw question with topic/key-concepts before retrieval."""
+        messages: list[Any] = [
+            {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
+            {"role": "user", "content": f"[PERTANYAAN MAHASISWA]\n{question}"},
+        ]
+        try:
+            raw = await self._call_with_retry(messages, temperature=0.1, max_tokens=256)
+        except Exception as exc:
+            logger.warning("Stage 1 decompose failed, falling back to raw question: {}", exc)
+            return parse_decompose_json("", question)
+        return parse_decompose_json(raw, question)
+
+    async def generate_followup(
+        self, question: str, dq: dict[str, Any], answer: str
+    ) -> list[str]:
+        """Stage 5: generate follow-up questions as a separate call from the main answer."""
+        prompt = (
+            f"[PERTANYAAN AWAL]\n{question}\n\n"
+            f"[TOPIK]\n{dq.get('topik_utama', '-')}\n\n"
+            f"[KONSEP KUNCI]\n{', '.join(dq.get('konsep_kunci', []))}\n\n"
+            f"[JAWABAN FINAL]\n{answer}\n"
+        )
+        messages: list[Any] = [
+            {"role": "system", "content": FOLLOWUP_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            raw = await self._call_with_retry(messages, temperature=0.4, max_tokens=256)
+        except Exception as exc:
+            logger.warning("Stage 5 follow-up generation failed: {}", exc)
+            return []
+        return parse_followup_json(raw)
+
     @staticmethod
     def _build_user_content(
         user_prompt: str, context: FormattedContext
@@ -116,14 +154,18 @@ class LLMGenerator:
         reraise=True,
     )
     async def _call_with_retry(
-        self, messages: list[Any]
+        self,
+        messages: list[Any],
+        *,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
     ) -> str:
         try:
             response = await self._client.chat.completions.create(
                 model=settings.generation_model,
                 messages=messages,
-                temperature=settings.generation_temperature,
-                max_tokens=settings.generation_max_tokens,
+                temperature=temperature if temperature is not None else settings.generation_temperature,
+                max_tokens=max_tokens if max_tokens is not None else settings.generation_max_tokens,
             )
         except _RETRYABLE:
             raise

@@ -20,36 +20,21 @@ from src.schemas import ElementType, ParsedElement
 
 
 def _completion_response(content: str) -> SimpleNamespace:
-    """Shape a fake OpenAI/Groq chat.completions.create response."""
+    """Shape a fake OpenAI-compatible chat.completions.create response."""
     return SimpleNamespace(
         choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
     )
 
 
-def _make_summarizer(
-    groq_text: str = "Ringkasan tabel.",
-    openai_text: str = "Deskripsi gambar.",
-) -> tuple[MultimodalSummarizer, AsyncMock, AsyncMock]:
-    """Build a summarizer with both SDK clients fully mocked."""
-    groq_create = AsyncMock(return_value=_completion_response(groq_text))
-    groq_client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(create=groq_create)
-        )
+def _make_summarizer(text: str = "Ringkasan.") -> tuple[MultimodalSummarizer, AsyncMock]:
+    """Build a summarizer with the single SDK client fully mocked."""
+    create = AsyncMock(return_value=_completion_response(text))
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=create))
     )
 
-    openai_create = AsyncMock(return_value=_completion_response(openai_text))
-    openai_client = SimpleNamespace(
-        chat=SimpleNamespace(
-            completions=SimpleNamespace(create=openai_create)
-        )
-    )
-
-    summarizer = MultimodalSummarizer(
-        groq_client=groq_client,  # type: ignore[arg-type]
-        openai_client=openai_client,  # type: ignore[arg-type]
-    )
-    return summarizer, groq_create, openai_create
+    summarizer = MultimodalSummarizer(client=client)  # type: ignore[arg-type]
+    return summarizer, create
 
 
 def _make_element(
@@ -94,43 +79,43 @@ class TestMimeDetection:
 class TestSummarizer:
     @pytest.mark.asyncio
     async def test_summarize_table_returns_content(self) -> None:
-        summ, groq_mock, _ = _make_summarizer(groq_text="Tabel berisi data nilai.")
+        summ, mock = _make_summarizer(text="Tabel berisi data nilai.")
         result = await summ.summarize_table("<table><tr><td>A</td></tr></table>")
 
         assert result == "Tabel berisi data nilai."
-        groq_mock.assert_awaited_once()
-        kwargs = groq_mock.call_args.kwargs
+        mock.assert_awaited_once()
+        kwargs = mock.call_args.kwargs
         assert "<table>" in kwargs["messages"][0]["content"]
 
     @pytest.mark.asyncio
     async def test_summarize_table_empty_raises(self) -> None:
-        summ, _, _ = _make_summarizer()
+        summ, _ = _make_summarizer()
         with pytest.raises(ValueError, match="Empty table HTML"):
             await summ.summarize_table("")
 
     @pytest.mark.asyncio
     async def test_describe_image_returns_content(self) -> None:
-        summ, _, openai_mock = _make_summarizer(openai_text="Grafik bar nilai siswa.")
+        summ, mock = _make_summarizer(text="Grafik bar nilai siswa.")
         png_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode()
 
         result = await summ.describe_image(png_b64)
 
         assert result == "Grafik bar nilai siswa."
-        openai_mock.assert_awaited_once()
-        msg = openai_mock.call_args.kwargs["messages"][0]
+        mock.assert_awaited_once()
+        msg = mock.call_args.kwargs["messages"][0]
         assert msg["content"][1]["type"] == "image_url"
         assert "data:image/png;base64," in msg["content"][1]["image_url"]["url"]
 
     @pytest.mark.asyncio
     async def test_describe_image_empty_raises(self) -> None:
-        summ, _, _ = _make_summarizer()
+        summ, _ = _make_summarizer()
         with pytest.raises(ValueError, match="Empty image base64"):
             await summ.describe_image("")
 
     @pytest.mark.asyncio
     async def test_empty_response_raises_summarization_error(self) -> None:
-        summ, groq_mock, _ = _make_summarizer()
-        groq_mock.return_value = _completion_response("")
+        summ, mock = _make_summarizer()
+        mock.return_value = _completion_response("")
 
         with pytest.raises(SummarizationError, match="empty content"):
             await summ.summarize_table("<table/>")
@@ -139,7 +124,7 @@ class TestSummarizer:
 class TestEnrichElements:
     @pytest.mark.asyncio
     async def test_text_passes_through_unchanged(self) -> None:
-        summ, groq_mock, openai_mock = _make_summarizer()
+        summ, mock = _make_summarizer()
         text_el = _make_element(ElementType.TEXT, content="Hello world.")
 
         result = await enrich_elements([text_el], summarizer=summ)
@@ -147,12 +132,11 @@ class TestEnrichElements:
         assert len(result) == 1
         assert result[0].summary is None
         assert result[0].content == "Hello world."
-        groq_mock.assert_not_awaited()
-        openai_mock.assert_not_awaited()
+        mock.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_table_gets_summary_via_groq(self) -> None:
-        summ, groq_mock, _ = _make_summarizer(groq_text="Tabel statistik nilai.")
+    async def test_table_gets_summary(self) -> None:
+        summ, mock = _make_summarizer(text="Tabel statistik nilai.")
         table_el = _make_element(
             ElementType.TABLE,
             raw_html="<table><tr><td>X</td></tr></table>",
@@ -162,11 +146,11 @@ class TestEnrichElements:
 
         assert result[0].summary == "Tabel statistik nilai."
         assert result[0].raw_html == "<table><tr><td>X</td></tr></table>"
-        groq_mock.assert_awaited_once()
+        mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_image_gets_summary_via_openai(self) -> None:
-        summ, _, openai_mock = _make_summarizer(openai_text="Diagram alir proses.")
+    async def test_image_gets_summary(self) -> None:
+        summ, mock = _make_summarizer(text="Diagram alir proses.")
         png_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode()
         image_el = _make_element(ElementType.IMAGE, image_base64=png_b64)
 
@@ -174,11 +158,11 @@ class TestEnrichElements:
 
         assert result[0].summary == "Diagram alir proses."
         assert result[0].image_base64 == png_b64
-        openai_mock.assert_awaited_once()
+        mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_input_elements_not_mutated(self) -> None:
-        summ, _, _ = _make_summarizer(groq_text="ringkasan")
+        summ, _ = _make_summarizer(text="ringkasan")
         original = _make_element(ElementType.TABLE, raw_html="<table/>")
         assert original.summary is None
 
@@ -190,18 +174,18 @@ class TestEnrichElements:
 
     @pytest.mark.asyncio
     async def test_table_without_html_skipped_gracefully(self) -> None:
-        summ, groq_mock, _ = _make_summarizer()
+        summ, mock = _make_summarizer()
         table_el = _make_element(ElementType.TABLE, raw_html=None)
 
         result = await enrich_elements([table_el], summarizer=summ)
 
         assert result[0].summary is None
-        groq_mock.assert_not_awaited()
+        mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_failure_does_not_break_batch(self) -> None:
-        summ, groq_mock, _ = _make_summarizer()
-        groq_mock.side_effect = SummarizationError("boom")
+        summ, mock = _make_summarizer()
+        mock.side_effect = SummarizationError("boom")
 
         elements = [
             _make_element(ElementType.TEXT, content="ok"),
@@ -218,9 +202,7 @@ class TestEnrichElements:
 
     @pytest.mark.asyncio
     async def test_concurrency_processes_mixed_batch(self) -> None:
-        summ, groq_mock, openai_mock = _make_summarizer(
-            groq_text="tabel-ringkasan", openai_text="gambar-deskripsi"
-        )
+        summ, mock = _make_summarizer(text="ringkasan")
         png_b64 = base64.b64encode(b"\x89PNG\r\n\x1a\n" + b"\x00" * 32).decode()
 
         elements = [
@@ -234,9 +216,8 @@ class TestEnrichElements:
 
         assert [e.summary for e in result] == [
             None,
-            "tabel-ringkasan",
-            "gambar-deskripsi",
-            "tabel-ringkasan",
+            "ringkasan",
+            "ringkasan",
+            "ringkasan",
         ]
-        assert groq_mock.await_count == 2
-        assert openai_mock.await_count == 1
+        assert mock.await_count == 3

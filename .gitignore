@@ -86,9 +86,15 @@ data/processed/*
 storage/**/*
 !storage/**/.gitkeep
 
+# HITL interaction & feedback logs — data lokal, bukan untuk di-share
+data/hitl_logs/
+
 # Local tool & editor settings
 .claude/
 pyrightconfig.json
+
+# Repo eksternal yang di-clone lokal (jangan masuk ke repo ini)
+RAG-Research/
 
 # Misc
 .abstra/

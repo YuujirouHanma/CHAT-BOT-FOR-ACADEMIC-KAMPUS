@@ -11,8 +11,7 @@ TTL_SECONDS = 3600
 @dataclass
 class Session:
     session_id: str
-    course: str | None = None
-    week: int | None = None
+    content_id: str | None = None
     source_filter: str | None = None
     history: list[dict] = field(default_factory=list)
     last_active: float = field(default_factory=time.monotonic)
@@ -24,15 +23,13 @@ class Session:
         return (time.monotonic() - self.last_active) > TTL_SECONDS
 
     def set_context(
-        self, course: str | None = None, week: int | None = None,
+        self, content_id: str | None = None,
         source_filter: str | None = None,
     ) -> None:
-        if course != self.course or week != self.week:
+        if content_id != self.content_id:
             self.source_filter = None
-        if course is not None:
-            self.course = course
-        if week is not None:
-            self.week = week
+        if content_id is not None:
+            self.content_id = content_id
         if source_filter is not None:
             self.source_filter = source_filter
         self.touch()

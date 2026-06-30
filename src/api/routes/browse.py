@@ -1,8 +1,7 @@
-"""Browse endpoints — navigate courses, weeks, and files.
+"""Browse endpoints — navigate contents and files.
 
-GET /browse/courses
-GET /browse/courses/{course}/weeks
-GET /browse/courses/{course}/weeks/{week}/files
+GET /browse/contents
+GET /browse/contents/{content_id}/files
 """
 from __future__ import annotations
 
@@ -10,62 +9,45 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from src.api.dependencies import get_pipeline
 from src.api.schemas import (
-    CourseListResponse,
+    ContentListResponse,
     FileInfo,
     FileListResponse,
-    WeekListResponse,
 )
 from src.pipeline import RAGPipeline
-from src.storage.course_store import list_courses, list_files, list_weeks
+from src.storage.content_store import list_contents, list_files
 
 router = APIRouter(prefix="/browse", tags=["browse"])
 
 
-@router.get("/courses", response_model=CourseListResponse)
-async def get_courses() -> CourseListResponse:
-    return CourseListResponse(courses=list_courses())
-
-
-@router.get("/courses/{course}/weeks", response_model=WeekListResponse)
-async def get_weeks(course: str) -> WeekListResponse:
-    weeks = list_weeks(course)
-    if not weeks:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Course '{course}' not found or has no weeks",
-        )
-    return WeekListResponse(course=course, weeks=weeks)
+@router.get("/contents", response_model=ContentListResponse)
+async def get_contents() -> ContentListResponse:
+    return ContentListResponse(contents=list_contents())
 
 
 @router.get(
-    "/courses/{course}/weeks/{week}/files",
+    "/contents/{content_id}/files",
     response_model=FileListResponse,
 )
 async def get_files(
-    course: str,
-    week: int,
+    content_id: str,
     pipeline: RAGPipeline = Depends(get_pipeline),
 ) -> FileListResponse:
-    """List ALL files for a course/week — documents, videos, audio, etc.
+    """List ALL files for a content_id — documents, videos, audio, etc.
     Documents get an `indexed` flag from Qdrant."""
-    fs_files = list_files(course, week)
+    fs_files = list_files(content_id)
     if not fs_files:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No files found for {course} minggu_{week}",
+            detail=f"No files found for content '{content_id}'",
         )
 
-    # Get indexed filenames from Qdrant
-    indexed_records = await pipeline._store.list_indexed_files(
-        course=course, week=week
-    )
+    indexed_records = await pipeline._store.list_indexed_files(content_id=content_id)
     indexed_names = {r["source_file"] for r in indexed_records}
 
     files = [
         FileInfo(
             filename=f.filename,
-            course=f.course,
-            week=f.week,
+            content_id=f.content_id,
             size_bytes=f.size_bytes,
             size_display=f.size_display,
             category=f.category.value,
@@ -79,8 +61,7 @@ async def get_files(
     total_indexed = sum(1 for f in files if f.indexed)
 
     return FileListResponse(
-        course=course,
-        week=week,
+        content_id=content_id,
         files=files,
         total_files=len(files),
         total_indexable=total_indexable,
