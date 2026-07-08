@@ -125,33 +125,44 @@ class QdrantStore:
         )
 
         use_hybrid = self._enable_sparse and sparse_vector is not None
+        result = None
         if use_hybrid:
             assert sparse_vector is not None
-            result = await asyncio.to_thread(
-                self._client.query_points,
-                collection_name=self._collection,
-                prefetch=[
-                    qm.Prefetch(
-                        query=dense_vector,
-                        using=_DENSE_VEC,
-                        limit=top_k * 2,
-                        filter=qfilter,
-                    ),
-                    qm.Prefetch(
-                        query=qm.SparseVector(
-                            indices=list(sparse_vector.keys()),
-                            values=list(sparse_vector.values()),
+            try:
+                result = await asyncio.to_thread(
+                    self._client.query_points,
+                    collection_name=self._collection,
+                    prefetch=[
+                        qm.Prefetch(
+                            query=dense_vector,
+                            using=_DENSE_VEC,
+                            limit=top_k * 2,
+                            filter=qfilter,
                         ),
-                        using=_SPARSE_VEC,
-                        limit=top_k * 2,
-                        filter=qfilter,
-                    ),
-                ],
-                query=qm.FusionQuery(fusion=qm.Fusion.RRF),
-                limit=top_k,
-                with_payload=True,
-            )
-        else:
+                        qm.Prefetch(
+                            query=qm.SparseVector(
+                                indices=list(sparse_vector.keys()),
+                                values=list(sparse_vector.values()),
+                            ),
+                            using=_SPARSE_VEC,
+                            limit=top_k * 2,
+                            filter=qfilter,
+                        ),
+                    ],
+                    query=qm.FusionQuery(fusion=qm.Fusion.RRF),
+                    limit=top_k,
+                    with_payload=True,
+                )
+            except KeyError as exc:
+                # Qdrant local mode raises KeyError('sparse') from _rescore_idf
+                # when the IDF-modified sparse index has no entries yet — e.g. a
+                # collection with zero sparse-indexed points. Degrade gracefully
+                # to dense-only instead of surfacing a 500 to the caller.
+                logger.warning(
+                    "Hybrid search unavailable ({}); falling back to dense-only", exc
+                )
+
+        if result is None:
             result = await asyncio.to_thread(
                 self._client.query_points,
                 collection_name=self._collection,

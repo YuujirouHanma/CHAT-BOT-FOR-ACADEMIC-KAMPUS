@@ -19,7 +19,7 @@ from unstructured.documents.elements import (
     Title,
 )
 
-from src.ingestion.parser import parse_document
+from src.ingestion.parser import _build_partition_kwargs, parse_document
 from src.ingestion.validators import FileValidationError, validate_file, validate_indexable
 from src.schemas import ElementType
 
@@ -222,3 +222,28 @@ class TestParser:
 
         with pytest.raises(RuntimeError, match="Failed to parse"):
             parse_document(self._real_file(tmp_path))
+
+
+class TestPartitionKwargs:
+    """Regression guard: partition() auto-routes non-PDF formats to their own
+    partitioner, which already sets infer_table_structure. Passing it again
+    raises 'got multiple values for keyword argument' and breaks docx/pptx/xlsx.
+    """
+
+    def test_pdf_uses_fast_strategy_without_infer_table_structure(
+        self, tmp_path: Path
+    ) -> None:
+        kwargs = _build_partition_kwargs(tmp_path / "materi.pdf")
+        assert kwargs == {"strategy": "fast"}
+        assert "infer_table_structure" not in kwargs
+
+    @pytest.mark.parametrize("ext", ["docx", "pptx", "xlsx", "txt", "md", "csv", "html"])
+    def test_non_pdf_never_passes_infer_table_structure(
+        self, tmp_path: Path, ext: str
+    ) -> None:
+        kwargs = _build_partition_kwargs(tmp_path / f"materi.{ext}")
+        assert "infer_table_structure" not in kwargs
+
+    def test_extension_matching_is_case_insensitive(self, tmp_path: Path) -> None:
+        assert _build_partition_kwargs(tmp_path / "SLIDE.PPTX") == {"strategy": "auto"}
+        assert _build_partition_kwargs(tmp_path / "REPORT.PDF") == {"strategy": "fast"}

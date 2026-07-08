@@ -4,8 +4,11 @@ Supports: PDF, DOCX, PPTX, TXT, MD, CSV, XLSX, HTML, RTF, RST, EPUB, TSV.
 Unstructured's partition() auto-detects file type.
 
 Strategy:
-- PDF: 'hi_res' if available (for table HTML + images), fallback to 'fast'.
-- Other formats: 'auto' (Unstructured auto-detects).
+- PDF: 'fast' (pdfminer, no OCR/Poppler needed — see feedback-parser-strategy).
+- Other formats (docx, pptx, xlsx, ...): let partition() auto-route to the
+  format-specific partitioner with its own defaults. We deliberately do NOT
+  pass infer_table_structure: partition() already forwards it internally, so
+  passing it again raises "got multiple values for keyword argument".
 """
 from __future__ import annotations
 
@@ -71,13 +74,16 @@ def _build_partition_kwargs(file_path: Path) -> dict[str, Any]:
     ext = file_path.suffix.lower().lstrip(".")
     if ext in _PDF_EXTENSIONS:
         # infer_table_structure omitted — Unstructured passes it internally for PDFs
-        # and would raise "multiple values" error if we also pass it
+        # and would raise "multiple values" error if we also pass it.
         return {
             "strategy": "fast",
         }
+    # For docx/pptx/xlsx/etc. partition() auto-routes to the format-specific
+    # partitioner, which already sets infer_table_structure (default True, so
+    # tables still get text_as_html). Passing it here again would raise
+    # "got multiple values for keyword argument 'infer_table_structure'".
     return {
         "strategy": "auto",
-        "infer_table_structure": True,
     }
 
 

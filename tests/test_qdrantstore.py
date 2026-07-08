@@ -241,6 +241,33 @@ class TestSearch:
         assert "prefetch" not in kwargs or kwargs.get("prefetch") is None
         assert kwargs["using"] == "dense"
 
+    @pytest.mark.asyncio
+    async def test_hybrid_keyerror_falls_back_to_dense_only(self) -> None:
+        """Qdrant local mode raises KeyError('sparse') from _rescore_idf when the
+        IDF sparse index is empty (e.g. a collection with zero sparse points).
+        The hybrid path must degrade to dense-only instead of raising."""
+        client, store = _make_client_and_store()
+        # First call = hybrid attempt → blows up; second call = dense fallback.
+        client.query_points.side_effect = [
+            KeyError("sparse"),
+            SimpleNamespace(
+                points=[SimpleNamespace(id="c1", score=0.5, payload={"text": "hi"})]
+            ),
+        ]
+
+        results = await store.search(
+            dense_vector=[0.1] * 1024, sparse_vector={5: 0.5}, top_k=5,
+        )
+
+        assert client.query_points.call_count == 2
+        # First attempt was hybrid (had prefetch); fallback was dense-only.
+        first_kwargs = client.query_points.call_args_list[0].kwargs
+        second_kwargs = client.query_points.call_args_list[1].kwargs
+        assert "prefetch" in first_kwargs
+        assert second_kwargs.get("using") == "dense"
+        assert "prefetch" not in second_kwargs
+        assert results == [{"chunk_id": "c1", "score": 0.5, "payload": {"text": "hi"}}]
+
 
 class TestDeleteBySource:
     @pytest.mark.asyncio
