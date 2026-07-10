@@ -49,6 +49,12 @@ class Settings(BaseSettings):
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
     # --- Qdrant ---
+    # local  → embedded on-disk client (QdrantClient(path=...)); no server needed.
+    #          Right for dev/tests and single-process runs.
+    # server → connect to a running Qdrant server at qdrant_host:qdrant_port.
+    #          Right for Docker/production (see docker-compose.yml qdrant service).
+    qdrant_mode: Literal["local", "server"] = "local"
+    qdrant_path: str = "./qdrant_storage"
     qdrant_host: str = "localhost"
     qdrant_port: int = Field(default=6333, ge=1, le=65535)
     qdrant_collection: str = "classroom_docs"

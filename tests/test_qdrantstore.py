@@ -44,6 +44,43 @@ def _make_client_and_store(enable_sparse: bool = True) -> tuple[MagicMock, Qdran
     return client, store
 
 
+class TestBuildClient:
+    """Regression guard for the local/server mode switch. docker-compose runs a
+    Qdrant server, so the code must be able to target it — not hardcode local."""
+
+    def test_local_mode_uses_path(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import src.storage.qdrant_store as mod
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            mod, "QdrantClient", lambda **kw: captured.update(kw) or MagicMock()
+        )
+        monkeypatch.setattr(mod.settings, "qdrant_mode", "local", raising=False)
+        monkeypatch.setattr(mod.settings, "qdrant_path", "./qdrant_storage", raising=False)
+
+        mod.QdrantStore._build_client()
+
+        assert captured.get("path") == "./qdrant_storage"
+        assert "host" not in captured
+
+    def test_server_mode_uses_host_and_port(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import src.storage.qdrant_store as mod
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            mod, "QdrantClient", lambda **kw: captured.update(kw) or MagicMock()
+        )
+        monkeypatch.setattr(mod.settings, "qdrant_mode", "server", raising=False)
+        monkeypatch.setattr(mod.settings, "qdrant_host", "qdrant", raising=False)
+        monkeypatch.setattr(mod.settings, "qdrant_port", 6333, raising=False)
+
+        mod.QdrantStore._build_client()
+
+        assert captured.get("host") == "qdrant"
+        assert captured.get("port") == 6333
+        assert "path" not in captured
+
+
 class TestEnsureCollection:
     @pytest.mark.asyncio
     async def test_creates_when_missing(self) -> None:

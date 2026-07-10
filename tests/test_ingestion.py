@@ -247,3 +247,96 @@ class TestPartitionKwargs:
     def test_extension_matching_is_case_insensitive(self, tmp_path: Path) -> None:
         assert _build_partition_kwargs(tmp_path / "SLIDE.PPTX") == {"strategy": "auto"}
         assert _build_partition_kwargs(tmp_path / "REPORT.PDF") == {"strategy": "fast"}
+
+
+class TestOcrFallback:
+    """A scanned/image PDF parses without error but yields ~no text under `fast`.
+    parse_document must retry with OCR, and degrade gracefully when OCR is
+    unavailable (e.g. Tesseract not installed) rather than crash the upload.
+    """
+
+    @staticmethod
+    def _pdf(tmp_path: Path) -> Path:
+        f = tmp_path / "scanned.pdf"
+        f.write_bytes(b"%PDF-1.4 dummy bytes for validator")
+        return f
+
+    @staticmethod
+    def _patch_sequence(
+        monkeypatch: pytest.MonkeyPatch, returns: list[Any]
+    ) -> list[dict[str, Any]]:
+        """Make partition() return/raise each item in `returns` on successive
+        calls. An item that is an Exception instance is raised. Records kwargs."""
+        from src.ingestion import parser as parser_mod
+
+        seq = iter(returns)
+        calls: list[dict[str, Any]] = []
+
+        def fake(**kwargs: Any) -> list[Any]:
+            calls.append(kwargs)
+            item = next(seq)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+        monkeypatch.setattr(parser_mod, "partition", fake)
+        return calls
+
+    def test_empty_pdf_retries_with_ocr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_sequence(
+            monkeypatch,
+            [
+                [_fake_narrative("")],  # fast → no text
+                [_fake_narrative("Teks hasil OCR dari slide.", page_number=1)],  # ocr_only
+            ],
+        )
+
+        result = parse_document(self._pdf(tmp_path))
+
+        assert len(calls) == 2
+        assert calls[1]["strategy"] == "ocr_only"
+        assert len(result) == 1
+        assert "OCR" in result[0].content
+
+    def test_ocr_unavailable_degrades_gracefully(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_sequence(
+            monkeypatch,
+            [
+                [_fake_narrative("")],  # fast → no text
+                RuntimeError("tesseract is not installed"),  # ocr attempt fails
+            ],
+        )
+
+        result = parse_document(self._pdf(tmp_path))  # must NOT raise
+
+        assert len(calls) == 2
+        assert result == []
+
+    def test_pdf_with_text_does_not_trigger_ocr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = self._patch_sequence(
+            monkeypatch,
+            [[_fake_narrative("Materi lengkap yang teksnya bisa diekstrak.", page_number=1)]],
+        )
+
+        result = parse_document(self._pdf(tmp_path))
+
+        assert len(calls) == 1  # no OCR retry
+        assert len(result) == 1
+
+    def test_empty_non_pdf_does_not_trigger_ocr(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        txt = tmp_path / "notes.txt"
+        txt.write_text("real content for validator")
+        calls = self._patch_sequence(monkeypatch, [[_fake_narrative("")]])
+
+        result = parse_document(txt)
+
+        assert len(calls) == 1  # non-PDF: no OCR retry even when empty
+        assert result == []

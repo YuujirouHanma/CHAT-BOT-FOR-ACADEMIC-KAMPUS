@@ -29,6 +29,11 @@ from src.utils.logger import logger
 
 _PDF_EXTENSIONS = {"pdf"}
 
+# Below this many extracted text chars, a PDF is treated as "no text" — almost
+# always a scanned/image-based PDF whose text lives in images. `fast` (pdfminer)
+# does no OCR, so we retry with OCR. See feedback-parser-strategy.
+_MIN_PDF_TEXT_CHARS = 20
+
 
 def parse_document(
     file_path: Path,
@@ -43,21 +48,22 @@ def parse_document(
     validate_indexable(file_path)
     logger.info("Parsing document: {}", file_path.name)
 
-    partition_kwargs = _build_partition_kwargs(file_path)
-
-    try:
-        elements: list[Element] = partition(
-            filename=str(file_path), **partition_kwargs
-        )
-    except Exception as exc:
-        logger.exception("Partition failed for {}", file_path.name)
-        raise RuntimeError(f"Failed to parse {file_path.name}: {exc}") from exc
-
-    parsed = _assemble_elements(
-        elements,
-        source_file=file_path.name,
-        content_id=content_id,
+    parsed = _partition_and_assemble(
+        file_path, _build_partition_kwargs(file_path), content_id
     )
+
+    # OCR fallback: a scanned/image PDF parses without error but yields ~no text.
+    # Retry with strategy="ocr_only" so it becomes searchable instead of empty.
+    if _is_pdf(file_path) and _text_char_count(parsed) < _MIN_PDF_TEXT_CHARS:
+        logger.warning(
+            "PDF '{}' produced only {} text chars with fast parse — likely "
+            "scanned/image-based; retrying with OCR (strategy=ocr_only)",
+            file_path.name,
+            _text_char_count(parsed),
+        )
+        ocr_parsed = _try_ocr(file_path, content_id)
+        if ocr_parsed is not None and _text_char_count(ocr_parsed) > _text_char_count(parsed):
+            parsed = ocr_parsed
 
     counts = _count_by_type(parsed)
     logger.info(
@@ -68,6 +74,59 @@ def parse_document(
         counts[ElementType.IMAGE],
     )
     return parsed
+
+
+def _partition_and_assemble(
+    file_path: Path, partition_kwargs: dict[str, Any], content_id: str | None,
+) -> list[ParsedElement]:
+    """Run partition() with the given kwargs and assemble ParsedElements.
+
+    A partition failure is fatal (wrapped in RuntimeError) — the caller cannot
+    recover from a corrupt/unreadable file.
+    """
+    try:
+        elements: list[Element] = partition(filename=str(file_path), **partition_kwargs)
+    except Exception as exc:
+        logger.exception("Partition failed for {}", file_path.name)
+        raise RuntimeError(f"Failed to parse {file_path.name}: {exc}") from exc
+
+    return _assemble_elements(
+        elements, source_file=file_path.name, content_id=content_id,
+    )
+
+
+def _try_ocr(file_path: Path, content_id: str | None) -> list[ParsedElement] | None:
+    """Re-parse a PDF with OCR. Returns None (not raising) when OCR is
+    unavailable — e.g. Tesseract/Poppler not installed — so a scanned PDF
+    degrades to an empty parse instead of crashing the upload.
+    """
+    try:
+        elements: list[Element] = partition(
+            filename=str(file_path),
+            strategy="ocr_only",
+            languages=["ind", "eng"],
+        )
+    except Exception as exc:
+        logger.warning(
+            "OCR fallback unavailable for {} ({}). To read scanned PDFs, install "
+            "Tesseract (tesseract-ocr + tesseract-ocr-ind) and Poppler in the "
+            "runtime image.",
+            file_path.name,
+            exc,
+        )
+        return None
+
+    return _assemble_elements(
+        elements, source_file=file_path.name, content_id=content_id,
+    )
+
+
+def _is_pdf(file_path: Path) -> bool:
+    return file_path.suffix.lower().lstrip(".") in _PDF_EXTENSIONS
+
+
+def _text_char_count(parsed: list[ParsedElement]) -> int:
+    return sum(len(e.content) for e in parsed if e.element_type == ElementType.TEXT)
 
 
 def _build_partition_kwargs(file_path: Path) -> dict[str, Any]:

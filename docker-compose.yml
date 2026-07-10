@@ -17,6 +17,26 @@ services:
       retries: 5
     restart: unless-stopped
 
+  backend:
+    build: .
+    container_name: ragacademic-backend
+    depends_on:
+      qdrant:
+        condition: service_healthy
+    # API key & GENERATION_* dibaca dari .env; QDRANT_* di bawah menimpanya
+    # agar backend SELALU pakai Qdrant server (bukan local mode) di Docker.
+    env_file: .env
+    environment:
+      QDRANT_MODE: server
+      QDRANT_HOST: qdrant     # nama service qdrant di jaringan compose
+      QDRANT_PORT: 6333       # port REST qdrant
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./storage:/app/storage   # materi yang diupload tetap ada walau container di-rebuild
+      - ./data:/app/data         # log HITL & upload sementara
+    restart: unless-stopped
+
 volumes:
   qdrant_storage:
     driver: local

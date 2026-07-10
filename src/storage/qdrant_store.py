@@ -39,12 +39,29 @@ class QdrantStore:
         collection: str | None = None,
         enable_sparse: bool | None = None,
     ) -> None:
-        # MENGGUNAKAN LOCAL MODE SEPENUHNYA (Aman untuk disk dan RAM)
-        self._client = client or QdrantClient(path="./qdrant_storage")
+        self._client = client or self._build_client()
         self._collection = collection or settings.qdrant_collection
         self._enable_sparse = (
             enable_sparse if enable_sparse is not None else settings.enable_hybrid_search
         )
+
+    @staticmethod
+    def _build_client() -> QdrantClient:
+        """Build the Qdrant client from settings.
+
+        local  → embedded on-disk client, no server required (dev/tests).
+        server → connect to the Qdrant server (Docker/production).
+        """
+        if settings.qdrant_mode == "server":
+            logger.info(
+                "Qdrant client: SERVER mode at {}:{}",
+                settings.qdrant_host,
+                settings.qdrant_port,
+            )
+            return QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+
+        logger.info("Qdrant client: LOCAL mode (path={})", settings.qdrant_path)
+        return QdrantClient(path=settings.qdrant_path)
 
     async def ensure_collection(self) -> None:
         """Create the collection if it doesn't exist. Idempotent."""
