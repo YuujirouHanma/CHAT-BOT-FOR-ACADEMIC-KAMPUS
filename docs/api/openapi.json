@@ -12,7 +12,7 @@
           "documents"
         ],
         "summary": "Upload Document",
-        "description": "Upload a document, save to storage/{content_id}/, and index.\n\nIf content_id given → saved under storage/{content_id}/{filename}.\nOtherwise → saved to data/uploads/ with UUID prefix.",
+        "description": "Upload a document, save to storage/{content_id}/, and index.\n\nIf content_id given → saved under storage/{content_id}/{filename}.\nOtherwise → saved to data/uploads/ with UUID prefix.\n\ncourse_id / course_name / week are optional — they power the guided catalog\n(mata kuliah → minggu → materi). If omitted they are derived from content_id\n(e.g. \"sbd-minggu-2\" → course \"sbd\", week 2).",
         "operationId": "upload_document_documents_upload_post",
         "requestBody": {
           "content": {
@@ -157,6 +157,195 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/FileListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog/courses": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Get Courses",
+        "description": "Step 1 — daftar mata kuliah yang punya materi terindex.",
+        "operationId": "get_courses_catalog_courses_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CourseListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/catalog/courses/{course_id}/weeks": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Get Weeks",
+        "description": "Step 2 — minggu yang tersedia untuk satu mata kuliah (auto-update).",
+        "operationId": "get_weeks_catalog_courses__course_id__weeks_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WeekListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog/courses/{course_id}/weeks/{week}/materials": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Get Materials",
+        "description": "Step 3 — daftar materi (dokumen) untuk satu minggu.",
+        "operationId": "get_materials_catalog_courses__course_id__weeks__week__materials_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          },
+          {
+            "name": "week",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Week"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaterialListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog/materials/{content_id}/{source_file}/starter-questions": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Get Starter Questions",
+        "description": "Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).",
+        "operationId": "get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Content Id"
+            }
+          },
+          {
+            "name": "source_file",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source File"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StarterQuestionsResponse"
                 }
               }
             }
@@ -389,6 +578,39 @@
               }
             ],
             "title": "Content Id"
+          },
+          "course_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Id"
+          },
+          "course_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Name"
+          },
+          "week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week"
           }
         },
         "type": "object",
@@ -412,6 +634,40 @@
           "contents"
         ],
         "title": "ContentListResponse"
+      },
+      "CourseInfo": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "course_name": {
+            "type": "string",
+            "title": "Course Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_id",
+          "course_name"
+        ],
+        "title": "CourseInfo"
+      },
+      "CourseListResponse": {
+        "properties": {
+          "courses": {
+            "items": {
+              "$ref": "#/components/schemas/CourseInfo"
+            },
+            "type": "array",
+            "title": "Courses"
+          }
+        },
+        "type": "object",
+        "required": [
+          "courses"
+        ],
+        "title": "CourseListResponse"
       },
       "FeedbackRequest": {
         "properties": {
@@ -587,6 +843,56 @@
         ],
         "title": "IndexResponse"
       },
+      "MaterialInfo": {
+        "properties": {
+          "source_file": {
+            "type": "string",
+            "title": "Source File"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "source_file"
+        ],
+        "title": "MaterialInfo"
+      },
+      "MaterialListResponse": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "week": {
+            "type": "integer",
+            "title": "Week"
+          },
+          "materials": {
+            "items": {
+              "$ref": "#/components/schemas/MaterialInfo"
+            },
+            "type": "array",
+            "title": "Materials"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_id",
+          "week",
+          "materials"
+        ],
+        "title": "MaterialListResponse"
+      },
       "QueryRequest": {
         "properties": {
           "question": {
@@ -749,6 +1055,32 @@
         ],
         "title": "SourceInfo"
       },
+      "StarterQuestionsResponse": {
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "source_file": {
+            "type": "string",
+            "title": "Source File"
+          },
+          "questions": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Questions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_id",
+          "source_file",
+          "questions"
+        ],
+        "title": "StarterQuestionsResponse"
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -781,6 +1113,27 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "WeekListResponse": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Weeks"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_id",
+          "weeks"
+        ],
+        "title": "WeekListResponse"
       }
     },
     "securitySchemes": {

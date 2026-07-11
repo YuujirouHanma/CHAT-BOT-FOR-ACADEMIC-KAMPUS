@@ -49,6 +49,18 @@ DECOMPOSE_SYSTEM_PROMPT = (
 )
 
 
+# --- Starter questions: template questions generated from a material's content ---
+STARTER_SYSTEM_PROMPT = (
+    "Anda adalah tutor yang membuat pertanyaan pembuka untuk mahasiswa yang "
+    "BARU membuka sebuah materi kuliah dan belum tahu harus bertanya apa. "
+    "Berdasarkan isi materi yang diberikan, buat tepat 5 pertanyaan pembuka yang: "
+    "(1) mencakup konsep-konsep utama materi, (2) sederhana dan mengundang, "
+    "cocok untuk mahasiswa yang baru belajar, (3) bisa dijawab dari materi itu. "
+    "Jawab HANYA dalam JSON valid berbentuk array string, tanpa markdown, tanpa "
+    'penjelasan. Contoh: ["Apa itu ...?", "Bagaimana cara ...?", "Mengapa ...?"]'
+)
+
+
 # --- Stage 5: Follow-up question generation (separate from the main answer) ---
 FOLLOWUP_SYSTEM_PROMPT = (
     "Anda adalah tutor yang membuat pertanyaan lanjutan untuk membantu mahasiswa belajar. "
@@ -148,8 +160,8 @@ def parse_decompose_json(raw: str, fallback_question: str) -> dict[str, Any]:
     }
 
 
-def parse_followup_json(raw: str) -> list[str]:
-    """Parse Stage 5 follow-up output into a list of up to 3 questions."""
+def parse_followup_json(raw: str, limit: int = 3) -> list[str]:
+    """Parse a JSON array of question strings, capped at `limit` items."""
     clean = raw.replace("```json", "").replace("```", "").strip()
 
     suggestions: list[str] = []
@@ -174,4 +186,4 @@ def parse_followup_json(raw: str) -> list[str]:
             if line.strip()
         ]
 
-    return [s for s in suggestions if s][:3]
+    return [s for s in suggestions if s][:limit]

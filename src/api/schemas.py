@@ -91,6 +91,38 @@ class BatchIndexSummary(BaseModel):
     results: list[BatchFileResult]
 
 
+# --- Catalog (guided navigation: mata kuliah → minggu → materi) ---
+class CourseInfo(BaseModel):
+    course_id: str
+    course_name: str
+
+
+class CourseListResponse(BaseModel):
+    courses: list[CourseInfo]
+
+
+class WeekListResponse(BaseModel):
+    course_id: str
+    weeks: list[int]
+
+
+class MaterialInfo(BaseModel):
+    source_file: str
+    content_id: str | None = None
+
+
+class MaterialListResponse(BaseModel):
+    course_id: str
+    week: int
+    materials: list[MaterialInfo]
+
+
+class StarterQuestionsResponse(BaseModel):
+    content_id: str
+    source_file: str
+    questions: list[str]
+
+
 # --- Error ---
 class ErrorResponse(BaseModel):
     detail: str

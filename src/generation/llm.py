@@ -24,6 +24,7 @@ from src.config import settings
 from src.generation.prompts import (
     DECOMPOSE_SYSTEM_PROMPT,
     FOLLOWUP_SYSTEM_PROMPT,
+    STARTER_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
     FormattedContext,
     build_user_prompt,
@@ -124,6 +125,26 @@ class LLMGenerator:
             logger.warning("Stage 5 follow-up generation failed: {}", exc)
             return []
         return parse_followup_json(raw)
+
+    async def generate_starter_questions(self, material_text: str) -> list[str]:
+        """Generate template opener questions from a material's text.
+
+        Returns [] on failure (caller can fall back to empty). Result is meant
+        to be cached by the caller so we don't pay per request.
+        """
+        text = (material_text or "").strip()
+        if not text:
+            return []
+        messages: list[Any] = [
+            {"role": "system", "content": STARTER_SYSTEM_PROMPT},
+            {"role": "user", "content": f"[ISI MATERI]\n{text}"},
+        ]
+        try:
+            raw = await self._call_with_retry(messages, temperature=0.4, max_tokens=384)
+        except Exception as exc:
+            logger.warning("Starter question generation failed: {}", exc)
+            return []
+        return parse_followup_json(raw, limit=5)
 
     @staticmethod
     def _build_user_content(

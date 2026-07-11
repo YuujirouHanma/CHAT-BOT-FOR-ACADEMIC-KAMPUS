@@ -89,6 +89,9 @@ storage/**/*
 # HITL interaction & feedback logs — data lokal, bukan untuk di-share
 data/hitl_logs/
 
+# Starter-question cache — hasil generate AI, dibuat ulang otomatis
+data/starter_questions/
+
 # Local tool & editor settings
 .claude/
 pyrightconfig.json

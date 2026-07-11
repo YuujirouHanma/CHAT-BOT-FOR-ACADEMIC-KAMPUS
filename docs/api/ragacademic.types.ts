@@ -19,6 +19,10 @@ export interface paths {
          *
          *     If content_id given → saved under storage/{content_id}/{filename}.
          *     Otherwise → saved to data/uploads/ with UUID prefix.
+         *
+         *     course_id / course_name / week are optional — they power the guided catalog
+         *     (mata kuliah → minggu → materi). If omitted they are derived from content_id
+         *     (e.g. "sbd-minggu-2" → course "sbd", week 2).
          */
         post: operations["upload_document_documents_upload_post"];
         delete?: never;
@@ -79,6 +83,86 @@ export interface paths {
          *     Documents get an `indexed` flag from Qdrant.
          */
         get: operations["get_files_browse_contents__content_id__files_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catalog/courses": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Courses
+         * @description Step 1 — daftar mata kuliah yang punya materi terindex.
+         */
+        get: operations["get_courses_catalog_courses_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catalog/courses/{course_id}/weeks": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Weeks
+         * @description Step 2 — minggu yang tersedia untuk satu mata kuliah (auto-update).
+         */
+        get: operations["get_weeks_catalog_courses__course_id__weeks_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catalog/courses/{course_id}/weeks/{week}/materials": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Materials
+         * @description Step 3 — daftar materi (dokumen) untuk satu minggu.
+         */
+        get: operations["get_materials_catalog_courses__course_id__weeks__week__materials_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catalog/materials/{content_id}/{source_file}/starter-questions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Starter Questions
+         * @description Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).
+         */
+        get: operations["get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -182,11 +266,29 @@ export interface components {
             file: string;
             /** Content Id */
             content_id?: string | null;
+            /** Course Id */
+            course_id?: string | null;
+            /** Course Name */
+            course_name?: string | null;
+            /** Week */
+            week?: number | null;
         };
         /** ContentListResponse */
         ContentListResponse: {
             /** Contents */
             contents: string[];
+        };
+        /** CourseInfo */
+        CourseInfo: {
+            /** Course Id */
+            course_id: string;
+            /** Course Name */
+            course_name: string;
+        };
+        /** CourseListResponse */
+        CourseListResponse: {
+            /** Courses */
+            courses: components["schemas"]["CourseInfo"][];
         };
         /** FeedbackRequest */
         FeedbackRequest: {
@@ -250,6 +352,22 @@ export interface components {
             /** Content Id */
             content_id: string | null;
         };
+        /** MaterialInfo */
+        MaterialInfo: {
+            /** Source File */
+            source_file: string;
+            /** Content Id */
+            content_id?: string | null;
+        };
+        /** MaterialListResponse */
+        MaterialListResponse: {
+            /** Course Id */
+            course_id: string;
+            /** Week */
+            week: number;
+            /** Materials */
+            materials: components["schemas"]["MaterialInfo"][];
+        };
         /** QueryRequest */
         QueryRequest: {
             /** Question */
@@ -289,6 +407,15 @@ export interface components {
             /** Rerank Score */
             rerank_score?: number | null;
         };
+        /** StarterQuestionsResponse */
+        StarterQuestionsResponse: {
+            /** Content Id */
+            content_id: string;
+            /** Source File */
+            source_file: string;
+            /** Questions */
+            questions: string[];
+        };
         /** ValidationError */
         ValidationError: {
             /** Location */
@@ -297,6 +424,13 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** WeekListResponse */
+        WeekListResponse: {
+            /** Course Id */
+            course_id: string;
+            /** Weeks */
+            weeks: number[];
         };
     };
     responses: never;
@@ -411,6 +545,121 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FileListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_courses_catalog_courses_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CourseListResponse"];
+                };
+            };
+        };
+    };
+    get_weeks_catalog_courses__course_id__weeks_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                course_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WeekListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_materials_catalog_courses__course_id__weeks__week__materials_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                course_id: string;
+                week: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MaterialListResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                content_id: string;
+                source_file: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["StarterQuestionsResponse"];
                 };
             };
             /** @description Validation Error */

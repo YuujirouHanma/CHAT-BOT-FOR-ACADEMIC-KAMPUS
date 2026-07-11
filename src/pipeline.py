@@ -9,6 +9,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src import starter_cache
+from src.catalog import resolve_course_week
 from src.generation.llm import LLMGenerator
 from src.generation.prompts import format_retrieval_results
 from src.hitl.logger import log_interaction
@@ -64,7 +66,12 @@ class RAGPipeline:
         await self._store.ensure_collection()
 
     async def index_document(
-        self, file_path: Path, content_id: str | None = None,
+        self,
+        file_path: Path,
+        content_id: str | None = None,
+        course_id: str | None = None,
+        course_name: str | None = None,
+        week: int | None = None,
     ) -> IndexResult:
         logger.info("=== Indexing {} (content_id={}) ===", file_path.name, content_id)
 
@@ -76,6 +83,20 @@ class RAGPipeline:
         chunks = self._chunker.chunk(enriched)
         if not chunks:
             return IndexResult(file_path.name, len(elements), 0, 0, content_id=content_id)
+
+        # Stamp catalog hierarchy (mata kuliah → minggu) onto every chunk:
+        # explicit args win, otherwise derive from content_id.
+        r_course_id, r_course_name, r_week = resolve_course_week(
+            content_id, course_id=course_id, course_name=course_name, week=week,
+        )
+        chunks = [
+            c.model_copy(update={
+                "course_id": r_course_id,
+                "course_name": r_course_name,
+                "week": r_week,
+            })
+            for c in chunks
+        ]
 
         embedded = await self._embedder.embed_chunks(chunks)
         stored = await self._store.upsert_chunks(embedded)
@@ -149,3 +170,17 @@ class RAGPipeline:
             answer=answer, sources=sources, recommendations=recommendations,
             interaction_id=interaction_id, decomposition=dq,
         )
+
+    async def starter_questions(
+        self, content_id: str, source_file: str,
+    ) -> list[str]:
+        """Template opener questions for a material. Cached after first generation."""
+        cached = starter_cache.load(content_id, source_file)
+        if cached is not None:
+            return cached
+
+        text = await self._store.get_material_text(content_id, source_file)
+        questions = await self._generator.generate_starter_questions(text)
+        if questions:
+            starter_cache.save(content_id, source_file, questions)
+        return questions

@@ -22,12 +22,19 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 async def upload_document(
     file: UploadFile = File(...),
     content_id: str | None = Form(default=None),
+    course_id: str | None = Form(default=None),
+    course_name: str | None = Form(default=None),
+    week: int | None = Form(default=None),
     pipeline: RAGPipeline = Depends(get_pipeline),
 ) -> IndexResponse:
     """Upload a document, save to storage/{content_id}/, and index.
 
     If content_id given → saved under storage/{content_id}/{filename}.
     Otherwise → saved to data/uploads/ with UUID prefix.
+
+    course_id / course_name / week are optional — they power the guided catalog
+    (mata kuliah → minggu → materi). If omitted they are derived from content_id
+    (e.g. "sbd-minggu-2" → course "sbd", week 2).
     """
     if not file.filename:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Filename required")
@@ -36,7 +43,11 @@ async def upload_document(
 
     try:
         result = await pipeline.index_document(
-            file_path=target_path, content_id=content_id,
+            file_path=target_path,
+            content_id=content_id,
+            course_id=course_id,
+            course_name=course_name,
+            week=week,
         )
     except FileValidationError as exc:
         target_path.unlink(missing_ok=True)

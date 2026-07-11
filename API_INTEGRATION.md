@@ -39,6 +39,12 @@ Request tanpa header atau dengan key salah akan dapat `401 Unauthorized`.
 
 Struktur file di storage: `storage/{content_id}/{filename}`
 
+## Alur Guided (Catalog) — untuk UI menuntun
+
+Untuk tampilan menuntun (mahasiswa pilih **mata kuliah → minggu → materi → pertanyaan template**,
+tanpa harus tahu cara prompt AI), tersedia endpoint navigasi `/catalog/*` + pertanyaan template
+auto-generate. Lihat panduan lengkap: [`docs/GUIDED_CATALOG.md`](docs/GUIDED_CATALOG.md).
+
 ---
 
 ## Endpoint

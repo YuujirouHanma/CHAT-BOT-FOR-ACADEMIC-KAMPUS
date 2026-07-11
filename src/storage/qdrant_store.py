@@ -238,6 +238,112 @@ class QdrantStore:
 
         return results
 
+    async def _scroll_payloads(
+        self, fields: list[str], qfilter: qm.Filter | None = None,
+    ) -> list[dict]:
+        """Scroll the whole collection, returning payloads projected to `fields`."""
+        payloads: list[dict] = []
+        offset: Any = None
+        while True:
+            batch, next_offset = await asyncio.to_thread(
+                self._client.scroll,
+                collection_name=self._collection,
+                scroll_filter=qfilter,
+                limit=256,
+                offset=offset,
+                with_payload=fields,
+                with_vectors=False,
+            )
+            payloads.extend(dict(p.payload or {}) for p in batch)
+            if next_offset is None:
+                break
+            offset = next_offset
+        return payloads
+
+    async def list_courses(self) -> list[dict]:
+        """Distinct courses that have indexed content. [{course_id, course_name}].
+
+        When a course has both a custom display name (sent explicitly at upload)
+        and an auto-derived one, the custom name wins so the nice name isn't lost
+        just because one week was uploaded without course_name.
+        """
+        from src.catalog import humanize_course
+
+        payloads = await self._scroll_payloads(["course_id", "course_name"])
+        courses: dict[str, str] = {}
+        for p in payloads:
+            cid = p.get("course_id")
+            if not cid:
+                continue
+            name = p.get("course_name") or cid
+            existing = courses.get(cid)
+            auto = humanize_course(cid)
+            if existing is None or (existing == auto and name != auto):
+                courses[cid] = name
+        return [
+            {"course_id": cid, "course_name": name}
+            for cid, name in sorted(courses.items())
+        ]
+
+    async def list_weeks(self, course_id: str) -> list[int]:
+        """Distinct weeks with indexed content for a course, ascending."""
+        qfilter = qm.Filter(
+            must=[qm.FieldCondition(key="course_id", match=qm.MatchValue(value=course_id))]
+        )
+        payloads = await self._scroll_payloads(["week"], qfilter)
+        weeks = {p["week"] for p in payloads if p.get("week") is not None}
+        return sorted(weeks)
+
+    async def list_materials(self, course_id: str, week: int) -> list[dict]:
+        """Distinct materials (source files) for a course+week.
+
+        Returns [{source_file, content_id}] — source_file is what the student
+        picks; content_id is what /chat/ask needs.
+        """
+        qfilter = qm.Filter(
+            must=[
+                qm.FieldCondition(key="course_id", match=qm.MatchValue(value=course_id)),
+                qm.FieldCondition(key="week", match=qm.MatchValue(value=week)),
+            ]
+        )
+        payloads = await self._scroll_payloads(["source_file", "content_id"], qfilter)
+        seen: dict[str, str | None] = {}
+        for p in payloads:
+            sf = p.get("source_file")
+            if sf and sf not in seen:
+                seen[sf] = p.get("content_id")
+        return [
+            {"source_file": sf, "content_id": cid}
+            for sf, cid in sorted(seen.items())
+        ]
+
+    async def get_material_text(
+        self, content_id: str, source_file: str, max_chars: int = 4000,
+    ) -> str:
+        """Concatenate the indexed text of one material, capped at max_chars.
+
+        Used to auto-generate starter questions from the material content.
+        """
+        qfilter = qm.Filter(
+            must=[
+                qm.FieldCondition(key="content_id", match=qm.MatchValue(value=content_id)),
+                qm.FieldCondition(key="source_file", match=qm.MatchValue(value=source_file)),
+            ]
+        )
+        payloads = await self._scroll_payloads(["text", "chunk_index"], qfilter)
+        payloads.sort(key=lambda p: p.get("chunk_index") or 0)
+        parts: list[str] = []
+        total = 0
+        for p in payloads:
+            t = (p.get("text") or "").strip()
+            if not t:
+                continue
+            parts.append(t)
+            total += len(t)
+            if total >= max_chars:
+                break
+        return "\n\n".join(parts)[:max_chars]
+
     async def delete_by_source(self, source_file: str) -> None:
         """Delete all chunks belonging to one source file."""
         await asyncio.to_thread(
@@ -298,6 +404,9 @@ class QdrantStore:
             "page_number": chunk.page_number,
             "chunk_index": chunk.chunk_index,
             "content_id": chunk.content_id,
+            "course_id": chunk.course_id,
+            "course_name": chunk.course_name,
+            "week": chunk.week,
             "raw_html": chunk.raw_html,
             "image_base64": chunk.image_base64,
         }

@@ -306,6 +306,98 @@ class TestSearch:
         assert results == [{"chunk_id": "c1", "score": 0.5, "payload": {"text": "hi"}}]
 
 
+class TestCatalogAggregation:
+    @staticmethod
+    def _points(payloads: list[dict]) -> list[SimpleNamespace]:
+        return [SimpleNamespace(payload=p) for p in payloads]
+
+    @pytest.mark.asyncio
+    async def test_list_courses_dedupes(self) -> None:
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"course_id": "sbd", "course_name": "SBD"},
+                {"course_id": "sbd", "course_name": "SBD"},
+                {"course_id": "kka", "course_name": "KKA"},
+                {"course_id": None, "course_name": None},  # ungrouped -> ignored
+            ]),
+            None,
+        )
+
+        courses = await store.list_courses()
+
+        assert courses == [
+            {"course_id": "kka", "course_name": "KKA"},
+            {"course_id": "sbd", "course_name": "SBD"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_list_courses_prefers_explicit_name(self) -> None:
+        client, store = _make_client_and_store()
+        # "SBD" is the auto-derived name; "Sistem Basis Data" is explicit.
+        # Auto appears first, but explicit must win regardless of order.
+        client.scroll.return_value = (
+            self._points([
+                {"course_id": "sbd", "course_name": "SBD"},
+                {"course_id": "sbd", "course_name": "Sistem Basis Data"},
+            ]),
+            None,
+        )
+
+        courses = await store.list_courses()
+
+        assert courses == [{"course_id": "sbd", "course_name": "Sistem Basis Data"}]
+
+    @pytest.mark.asyncio
+    async def test_list_weeks_sorted_unique(self) -> None:
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([{"week": 3}, {"week": 1}, {"week": 3}, {"week": None}]),
+            None,
+        )
+
+        weeks = await store.list_weeks("sbd")
+
+        assert weeks == [1, 3]
+        # filter applied on course_id
+        assert client.scroll.call_args.kwargs["scroll_filter"] is not None
+
+    @pytest.mark.asyncio
+    async def test_list_materials_dedupes_by_source_file(self) -> None:
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"source_file": "a.pdf", "content_id": "sbd-minggu-1"},
+                {"source_file": "a.pdf", "content_id": "sbd-minggu-1"},
+                {"source_file": "b.pptx", "content_id": "sbd-minggu-1"},
+            ]),
+            None,
+        )
+
+        materials = await store.list_materials("sbd", 1)
+
+        assert materials == [
+            {"source_file": "a.pdf", "content_id": "sbd-minggu-1"},
+            {"source_file": "b.pptx", "content_id": "sbd-minggu-1"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_get_material_text_orders_and_caps(self) -> None:
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"text": "second", "chunk_index": 1},
+                {"text": "first", "chunk_index": 0},
+            ]),
+            None,
+        )
+
+        text = await store.get_material_text("sbd-minggu-1", "a.pdf", max_chars=1000)
+
+        assert text.startswith("first")
+        assert "second" in text
+
+
 class TestDeleteBySource:
     @pytest.mark.asyncio
     async def test_calls_delete_with_filter(self) -> None:
