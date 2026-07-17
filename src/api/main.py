@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.auth import verify_api_key
-from src.api.routes import batch, browse, catalog, chat, upload
+from src.api.routes import batch, browse, catalog, chat, models, upload
 from src.config import settings
 from src.pipeline import RAGPipeline
 from src.utils.logger import logger
@@ -51,6 +51,7 @@ app.include_router(upload.router, dependencies=_auth)
 app.include_router(batch.router, dependencies=_auth)
 app.include_router(browse.router, dependencies=_auth)
 app.include_router(catalog.router, dependencies=_auth)
+app.include_router(models.router, dependencies=_auth)
 app.include_router(chat.router, dependencies=_auth)
 
 

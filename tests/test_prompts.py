@@ -4,10 +4,14 @@ Pure logic, no mocks needed.
 """
 from __future__ import annotations
 
+import json
+
 from src.generation.prompts import (
     SYSTEM_PROMPT,
+    build_system_prompt,
     build_user_prompt,
     format_retrieval_results,
+    parse_quiz_json,
 )
 
 
@@ -142,6 +146,50 @@ class TestBuildUserPrompt:
         ctx = format_retrieval_results([_result(text="ctx")])
         prompt = build_user_prompt("   What?   \n", ctx)
         assert "What?" in prompt
+
+
+class TestParseQuizJson:
+    def test_parses_valid_items(self) -> None:
+        raw = json.dumps([
+            {"question": "Q1?", "options": ["a", "b", "c", "d"],
+             "answer_index": 1, "explanation": "why"},
+        ])
+        quiz = parse_quiz_json(raw)
+        assert len(quiz) == 1
+        assert quiz[0]["question"] == "Q1?"
+        assert quiz[0]["answer_index"] == 1
+
+    def test_extracts_array_from_surrounding_text(self) -> None:
+        raw = 'Berikut soalnya:\n[{"question":"Q?","options":["a","b","c","d"],"answer_index":0}]\nsekian'
+        assert len(parse_quiz_json(raw)) == 1
+
+    def test_rejects_wrong_option_count(self) -> None:
+        raw = json.dumps([{"question": "Q?", "options": ["a", "b", "c"], "answer_index": 0}])
+        assert parse_quiz_json(raw) == []
+
+    def test_rejects_out_of_range_answer_index(self) -> None:
+        raw = json.dumps([{"question": "Q?", "options": ["a", "b", "c", "d"], "answer_index": 9}])
+        assert parse_quiz_json(raw) == []
+
+    def test_garbage_returns_empty(self) -> None:
+        assert parse_quiz_json("bukan json sama sekali") == []
+
+
+class TestBuildSystemPrompt:
+    def test_sederhana_adds_simple_instruction(self) -> None:
+        prompt = build_system_prompt("sederhana")
+        assert prompt.startswith(SYSTEM_PROMPT)
+        assert "SANGAT SEDERHANA" in prompt
+
+    def test_detail_adds_deep_instruction(self) -> None:
+        assert "MENDALAM" in build_system_prompt("detail")
+
+    def test_standar_is_base_prompt(self) -> None:
+        assert build_system_prompt("standar") == SYSTEM_PROMPT
+
+    def test_none_and_unknown_fall_back_to_base(self) -> None:
+        assert build_system_prompt(None) == SYSTEM_PROMPT
+        assert build_system_prompt("ngaco") == SYSTEM_PROMPT
 
 
 class TestSystemPrompt:

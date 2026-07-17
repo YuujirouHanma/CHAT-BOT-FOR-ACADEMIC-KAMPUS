@@ -67,11 +67,63 @@ Pakai endpoint chat yang sudah ada. Untuk membatasi jawaban ke materi terpilih, 
 POST /chat/ask
 { "question": "Apa perbedaan while dan for loop?",
   "content_id": "sbd-minggu-2",
-  "source_filter": "Branching and Iteration - MIT.pdf" }
+  "source_filter": "Branching and Iteration - MIT.pdf",
+  "model": "qwen3.7-plus" }
 ```
 - **Pertanyaan template**: kirim teks pertanyaan yang diklik.
-- **Pertanyaan rekomendasi**: ada di field `recommendations` pada response `/chat/ask` (otomatis dari jawaban sebelumnya).
+- **Pertanyaan rekomendasi**: ada di field `recommendations` — selalu **3 tipe berbeda** (definisi, contoh/penerapan, perbandingan, dst.), otomatis dari jawaban sebelumnya.
 - **Tanya bebas**: sama, mahasiswa ketik sendiri. `source_filter` boleh dilepas kalau mau cari se-minggu/se-matkul.
+- **`model`** (opsional): key model dari `GET /models`. Kosong = pakai model default server.
+- **`level`** (opsional): gaya jawaban — `"sederhana"` (bahasa mudah, untuk pemula/mahasiswa
+  bingung), `"standar"` (default, akademis), atau `"detail"` (mendalam/teknis). Cocok untuk
+  tombol **"Sederhanakan"**: kirim ulang pertanyaan yang sama dengan `level: "sederhana"`.
+
+### 6. Kuis (opsional, per materi)
+`GET /catalog/materials/{content_id}/{source_file}/quiz` — kuis pilihan ganda auto-generate + cache.
+```json
+{ "content_id": "sbd-minggu-2", "source_file": "...",
+  "questions": [
+    { "question": "Apa prinsip Stack?",
+      "options": ["FIFO", "LIFO", "Random", "FILO"],
+      "answer_index": 1,
+      "explanation": "Stack memakai prinsip LIFO." }
+  ] }
+```
+`answer_index` = indeks opsi benar (0-3). Tambah `?model=<key>` untuk pilih LLM.
+
+**Nilai jawaban** — `POST /catalog/materials/{content_id}/{source_file}/quiz/submit`
+```json
+// request
+{ "answers": [1, 0, 2, 1, 1], "session_id": "opsional", "student_id": "opsional" }
+// response
+{ "content_id": "...", "source_file": "...",
+  "total": 5, "correct": 3, "score": 60.0, "attempt_id": "quiz_2026...",
+  "results": [
+    { "question": "...", "options": ["..."], "your_answer": 1,
+      "correct_answer": 1, "is_correct": true, "explanation": "..." }
+  ] }
+```
+`answers` = indeks opsi yang dipilih mahasiswa, **urut sesuai soal** dari GET quiz. Dinilai
+terhadap kuis yang sama (cache), `score` = 0-100. Setiap attempt dicatat ke
+`data/hitl_logs/quiz_attempts.jsonl` (progres bisa direview dosen). Soal tak dijawab = salah.
+
+---
+
+## Ganti model dari UI (multi-provider)
+
+`GET /models` → daftar model yang **bisa dipakai** (hanya provider yang punya API key di server):
+```json
+{ "default": "qwen3.7-plus",
+  "models": [
+    { "key": "qwen3.7-plus", "label": "Qwen 3.7 Plus", "provider": "openrouter", "vision": true },
+    { "key": "gpt-4o-mini", "label": "GPT-4o mini", "provider": "openai", "vision": true },
+    { "key": "groq-llama-70b", "label": "Llama 3.3 70B (Groq)", "provider": "groq", "vision": false }
+  ] }
+```
+UI menampilkan dropdown dari `models`, lalu kirim `key` yang dipilih sebagai field **`model`** di
+`/chat/ask`, atau `?model=<key>` di starter-questions & quiz. Provider didukung: **OpenRouter (Qwen),
+OpenAI, Groq, Gemini** — cukup isi API key provider-nya di `.env`, model langsung muncul di `/models`.
+Model yang belum ada key-nya otomatis **tidak ditampilkan** (UI tak akan menawarkan yang bakal gagal).
 
 ---
 

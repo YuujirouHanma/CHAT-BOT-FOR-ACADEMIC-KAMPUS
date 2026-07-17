@@ -12,6 +12,8 @@ class QueryRequest(BaseModel):
     session_id: str | None = None
     content_id: str | None = None
     source_filter: str | None = Field(default=None, max_length=255)
+    model: str | None = Field(default=None, max_length=64)  # registry key; None = default
+    level: Literal["sederhana", "standar", "detail"] | None = None  # gaya jawaban
 
 
 class SourceInfo(BaseModel):
@@ -121,6 +123,58 @@ class StarterQuestionsResponse(BaseModel):
     content_id: str
     source_file: str
     questions: list[str]
+
+
+# --- Quiz ---
+class QuizQuestion(BaseModel):
+    question: str
+    options: list[str]
+    answer_index: int
+    explanation: str = ""
+
+
+class QuizResponse(BaseModel):
+    content_id: str
+    source_file: str
+    questions: list[QuizQuestion]
+
+
+class QuizSubmitRequest(BaseModel):
+    answers: list[int] = Field(description="Indeks opsi yang dipilih per soal (urut sesuai soal)")
+    session_id: str | None = None
+    student_id: str | None = None
+
+
+class QuizResultItem(BaseModel):
+    question: str
+    options: list[str]
+    your_answer: int | None = None
+    correct_answer: int
+    is_correct: bool
+    explanation: str = ""
+
+
+class QuizSubmitResponse(BaseModel):
+    content_id: str
+    source_file: str
+    total: int
+    correct: int
+    score: float                 # 0-100
+    attempt_id: str
+    results: list[QuizResultItem]
+
+
+# --- Models (untuk UI switching) ---
+class ModelInfo(BaseModel):
+    key: str
+    label: str
+    provider: str
+    vision: bool
+
+
+class ModelListResponse(BaseModel):
+    default: str
+    models: list[ModelInfo]
 
 
 # --- Error ---

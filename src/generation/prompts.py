@@ -26,6 +26,31 @@ SYSTEM_PROMPT = """Anda adalah asisten pembelajaran untuk mahasiswa. Tugas Anda:
 6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat."""
 
 
+# Level gaya jawaban — ditambahkan ke SYSTEM_PROMPT. Untuk mahasiswa pelosok yang
+# bingung, "sederhana" menjelaskan seperti ke pemula; "detail" untuk yang mau mendalam.
+ANSWER_LEVEL_INSTRUCTIONS = {
+    "sederhana": (
+        "\n\nGAYA JAWABAN: Jelaskan dengan bahasa SANGAT SEDERHANA, seolah menjelaskan "
+        "ke siswa SMA atau orang yang baru pertama belajar. Hindari istilah teknis; jika "
+        "terpaksa memakainya, jelaskan artinya dengan kata sehari-hari. Pakai kalimat "
+        "pendek dan analogi yang mudah dibayangkan. Tetap sertakan [Sumber N]."
+    ),
+    "standar": "",
+    "detail": (
+        "\n\nGAYA JAWABAN: Jelaskan secara MENDALAM untuk mahasiswa tingkat lanjut. "
+        "Sertakan detail penting, istilah teknis yang tepat beserta nuansanya, dan bila "
+        "relevan tunjukkan keterkaitan antar konsep. Tetap sertakan [Sumber N]."
+    ),
+}
+
+
+def build_system_prompt(level: str | None = None) -> str:
+    """SYSTEM_PROMPT plus an optional answer-level style instruction.
+
+    Unknown/None level → standard prompt (no extra instruction)."""
+    return SYSTEM_PROMPT + ANSWER_LEVEL_INSTRUCTIONS.get(level or "standar", "")
+
+
 USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
 {context}
 
@@ -62,12 +87,32 @@ STARTER_SYSTEM_PROMPT = (
 
 
 # --- Stage 5: Follow-up question generation (separate from the main answer) ---
+# General-purpose: works for ANY subject. Enforces 3 DIFFERENT question TYPES so
+# the recommendations are varied instead of three near-duplicates.
 FOLLOWUP_SYSTEM_PROMPT = (
-    "Anda adalah tutor yang membuat pertanyaan lanjutan untuk membantu mahasiswa belajar. "
+    "Anda adalah tutor yang membuat pertanyaan lanjutan untuk membantu mahasiswa belajar, "
+    "untuk materi kuliah APA PUN (berlaku umum, bukan satu bidang tertentu). "
     "Buat tepat 3 pertanyaan lanjutan yang relevan dengan pertanyaan awal dan jawaban final. "
+    "WAJIB: ketiganya harus dari TIPE yang BERBEDA — pilih 3 tipe berbeda dari daftar ini: "
+    "definisi/konsep, contoh/penerapan, perbandingan/perbedaan, sebab-akibat/alasan, "
+    "langkah/proses, atau analisis/evaluasi. "
     "Pertanyaan harus singkat, natural, dan mendorong pemahaman lebih dalam. "
     "Jawab HANYA dalam JSON valid berbentuk array string, tanpa markdown, tanpa penjelasan. "
-    'Contoh: ["Pertanyaan 1?", "Pertanyaan 2?", "Pertanyaan 3?"]'
+    'Contoh (tipe berbeda): ["Apa yang dimaksud dengan ...?", '
+    '"Bagaimana penerapan ... dalam kasus nyata?", "Apa perbedaan ... dan ...?"]'
+)
+
+
+# --- Quiz: multiple-choice questions generated from a material's content ---
+QUIZ_SYSTEM_PROMPT = (
+    "Anda adalah pembuat soal kuis untuk mahasiswa, untuk materi kuliah APA PUN "
+    "(berlaku umum). Berdasarkan isi materi yang diberikan, buat 5 soal PILIHAN GANDA yang: "
+    "(1) menguji pemahaman konsep utama materi, (2) punya TEPAT 4 opsi jawaban, "
+    "(3) hanya SATU jawaban benar, (4) sertakan penjelasan singkat mengapa jawaban itu benar. "
+    "Jawab HANYA dalam JSON valid berbentuk array objek, tanpa markdown, tanpa teks lain. "
+    "Setiap objek berbentuk: "
+    '{"question": "...", "options": ["A", "B", "C", "D"], "answer_index": 0, "explanation": "..."} '
+    "di mana answer_index adalah indeks (0-3) dari opsi yang benar."
 )
 
 
@@ -187,3 +232,43 @@ def parse_followup_json(raw: str, limit: int = 3) -> list[str]:
         ]
 
     return [s for s in suggestions if s][:limit]
+
+
+def parse_quiz_json(raw: str) -> list[dict[str, Any]]:
+    """Parse a JSON array of multiple-choice quiz items.
+
+    Keeps only well-formed items: non-empty question, exactly 4 string options,
+    and an answer_index within range. Returns [] if nothing valid is found.
+    """
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    data: Any = None
+    try:
+        data = json.loads(clean)
+    except Exception:
+        match = re.search(r"\[[\s\S]*\]", clean)
+        if match:
+            try:
+                data = json.loads(match.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, list):
+        return []
+
+    quiz: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        question = str(item.get("question", "")).strip()
+        options = item.get("options")
+        answer_index = item.get("answer_index")
+        if not question or not isinstance(options, list) or len(options) != 4:
+            continue
+        if not isinstance(answer_index, int) or not (0 <= answer_index < 4):
+            continue
+        quiz.append({
+            "question": question,
+            "options": [str(o) for o in options],
+            "answer_index": answer_index,
+            "explanation": str(item.get("explanation", "")).strip(),
+        })
+    return quiz

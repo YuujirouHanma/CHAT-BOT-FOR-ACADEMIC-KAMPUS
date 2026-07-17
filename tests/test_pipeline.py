@@ -82,6 +82,48 @@ class TestSetup:
         mocks["store"].ensure_collection.assert_awaited_once()
 
 
+class TestGradeQuiz:
+    _QUIZ = [
+        {"question": "Q1", "options": ["a", "b", "c", "d"], "answer_index": 1, "explanation": "e1"},
+        {"question": "Q2", "options": ["a", "b", "c", "d"], "answer_index": 2, "explanation": "e2"},
+        {"question": "Q3", "options": ["a", "b", "c", "d"], "answer_index": 0, "explanation": "e3"},
+    ]
+
+    @pytest.mark.asyncio
+    async def test_scores_and_marks_each_answer(self) -> None:
+        pipeline, _ = _make_pipeline()
+        with patch("src.pipeline.gen_cache.load", return_value=self._QUIZ), \
+             patch("src.pipeline.log_quiz_attempt", return_value="quiz_1"):
+            res = await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[1, 0, 0])
+
+        assert res["total"] == 3
+        assert res["correct"] == 2  # Q1 & Q3 right, Q2 wrong
+        assert res["score"] == 66.7
+        assert res["attempt_id"] == "quiz_1"
+        assert res["results"][1]["is_correct"] is False
+        assert res["results"][1]["correct_answer"] == 2
+
+    @pytest.mark.asyncio
+    async def test_missing_answers_counted_wrong(self) -> None:
+        pipeline, _ = _make_pipeline()
+        with patch("src.pipeline.gen_cache.load", return_value=self._QUIZ), \
+             patch("src.pipeline.log_quiz_attempt", return_value="quiz_2"):
+            res = await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[1])  # only 1 of 3
+
+        assert res["correct"] == 1
+        assert res["results"][2]["your_answer"] is None
+        assert res["results"][2]["is_correct"] is False
+
+    @pytest.mark.asyncio
+    async def test_no_quiz_raises(self) -> None:
+        pipeline, mocks = _make_pipeline()
+        mocks["generator"].generate_quiz = AsyncMock(return_value=[])
+        mocks["store"].get_material_text = AsyncMock(return_value="")
+        with patch("src.pipeline.gen_cache.load", return_value=None):
+            with pytest.raises(ValueError, match="tidak tersedia"):
+                await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[0])
+
+
 class TestIndexDocument:
     @pytest.mark.asyncio
     async def test_full_indexing_flow(self, tmp_path: Path) -> None:

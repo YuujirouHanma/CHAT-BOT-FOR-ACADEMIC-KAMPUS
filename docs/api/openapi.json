@@ -312,7 +312,7 @@
           "catalog"
         ],
         "summary": "Get Starter Questions",
-        "description": "Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).",
+        "description": "Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).\n\n`model` (query param) opsional — key model dari /models untuk memilih LLM.",
         "operationId": "get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get",
         "security": [
           {
@@ -336,6 +336,22 @@
             "schema": {
               "type": "string",
               "title": "Source File"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
             }
           }
         ],
@@ -361,6 +377,172 @@
             }
           }
         }
+      }
+    },
+    "/catalog/materials/{content_id}/{source_file}/quiz": {
+      "get": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Get Quiz",
+        "description": "Kuis pilihan ganda untuk satu materi (auto-generate + cache).\n\n`model` (query param) opsional. Tiap soal: pertanyaan, 4 opsi, answer_index, penjelasan.",
+        "operationId": "get_quiz_catalog_materials__content_id___source_file__quiz_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Content Id"
+            }
+          },
+          {
+            "name": "source_file",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source File"
+            }
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/catalog/materials/{content_id}/{source_file}/quiz/submit": {
+      "post": {
+        "tags": [
+          "catalog"
+        ],
+        "summary": "Submit Quiz",
+        "description": "Nilai jawaban kuis mahasiswa → skor + pembahasan per soal, dan simpan progres.\n\n`answers` = indeks opsi (0-3) yang dipilih, urut sesuai soal dari GET .../quiz.",
+        "operationId": "submit_quiz_catalog_materials__content_id___source_file__quiz_submit_post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "content_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Content Id"
+            }
+          },
+          {
+            "name": "source_file",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Source File"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/QuizSubmitRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuizSubmitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/models": {
+      "get": {
+        "tags": [
+          "models"
+        ],
+        "summary": "List Models",
+        "operationId": "list_models_models_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelListResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
       }
     },
     "/chat/ask": {
@@ -893,6 +1075,55 @@
         ],
         "title": "MaterialListResponse"
       },
+      "ModelInfo": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "provider": {
+            "type": "string",
+            "title": "Provider"
+          },
+          "vision": {
+            "type": "boolean",
+            "title": "Vision"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "label",
+          "provider",
+          "vision"
+        ],
+        "title": "ModelInfo"
+      },
+      "ModelListResponse": {
+        "properties": {
+          "default": {
+            "type": "string",
+            "title": "Default"
+          },
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/ModelInfo"
+            },
+            "type": "array",
+            "title": "Models"
+          }
+        },
+        "type": "object",
+        "required": [
+          "default",
+          "models"
+        ],
+        "title": "ModelListResponse"
+      },
       "QueryRequest": {
         "properties": {
           "question": {
@@ -934,6 +1165,34 @@
               }
             ],
             "title": "Source Filter"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "level": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sederhana",
+                  "standar",
+                  "detail"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Level"
           }
         },
         "type": "object",
@@ -986,6 +1245,195 @@
           "session_id"
         ],
         "title": "QueryResponse"
+      },
+      "QuizQuestion": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "answer_index": {
+            "type": "integer",
+            "title": "Answer Index"
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "question",
+          "options",
+          "answer_index"
+        ],
+        "title": "QuizQuestion"
+      },
+      "QuizResponse": {
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "source_file": {
+            "type": "string",
+            "title": "Source File"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/QuizQuestion"
+            },
+            "type": "array",
+            "title": "Questions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_id",
+          "source_file",
+          "questions"
+        ],
+        "title": "QuizResponse"
+      },
+      "QuizResultItem": {
+        "properties": {
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "your_answer": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Your Answer"
+          },
+          "correct_answer": {
+            "type": "integer",
+            "title": "Correct Answer"
+          },
+          "is_correct": {
+            "type": "boolean",
+            "title": "Is Correct"
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "question",
+          "options",
+          "correct_answer",
+          "is_correct"
+        ],
+        "title": "QuizResultItem"
+      },
+      "QuizSubmitRequest": {
+        "properties": {
+          "answers": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Answers",
+            "description": "Indeks opsi yang dipilih per soal (urut sesuai soal)"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "student_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Student Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "answers"
+        ],
+        "title": "QuizSubmitRequest"
+      },
+      "QuizSubmitResponse": {
+        "properties": {
+          "content_id": {
+            "type": "string",
+            "title": "Content Id"
+          },
+          "source_file": {
+            "type": "string",
+            "title": "Source File"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "correct": {
+            "type": "integer",
+            "title": "Correct"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "attempt_id": {
+            "type": "string",
+            "title": "Attempt Id"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/QuizResultItem"
+            },
+            "type": "array",
+            "title": "Results"
+          }
+        },
+        "type": "object",
+        "required": [
+          "content_id",
+          "source_file",
+          "total",
+          "correct",
+          "score",
+          "attempt_id",
+          "results"
+        ],
+        "title": "QuizSubmitResponse"
       },
       "SourceInfo": {
         "properties": {

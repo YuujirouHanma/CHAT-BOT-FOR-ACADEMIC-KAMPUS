@@ -16,6 +16,7 @@ from src.config import PROJECT_ROOT
 HITL_DIR = PROJECT_ROOT / "data" / "hitl_logs"
 CONVERSATION_LOG_PATH = HITL_DIR / "conversation_logs.jsonl"
 FEEDBACK_LOG_PATH = HITL_DIR / "student_feedback_logs.jsonl"
+QUIZ_ATTEMPT_LOG_PATH = HITL_DIR / "quiz_attempts.jsonl"
 
 
 def _json_safe(obj: Any) -> Any:
@@ -60,6 +61,32 @@ def log_interaction(
     }
     _append_jsonl(CONVERSATION_LOG_PATH, record)
     return interaction_id
+
+
+def log_quiz_attempt(
+    content_id: str,
+    source_file: str,
+    correct: int,
+    total: int,
+    score: float,
+    session_id: str | None = None,
+    student_id: str | None = None,
+) -> str:
+    """Log one quiz attempt (for progress tracking). Returns the attempt_id."""
+    attempt_id = f"quiz_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
+    record = {
+        "attempt_id": attempt_id,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "session_id": session_id,
+        "student_id": student_id,
+        "content_id": content_id,
+        "source_file": source_file,
+        "correct": correct,
+        "total": total,
+        "score": score,
+    }
+    _append_jsonl(QUIZ_ATTEMPT_LOG_PATH, record)
+    return attempt_id
 
 
 def log_feedback(

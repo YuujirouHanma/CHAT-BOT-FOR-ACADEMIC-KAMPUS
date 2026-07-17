@@ -89,8 +89,8 @@ storage/**/*
 # HITL interaction & feedback logs — data lokal, bukan untuk di-share
 data/hitl_logs/
 
-# Starter-question cache — hasil generate AI, dibuat ulang otomatis
-data/starter_questions/
+# Generated content cache (starter questions, quiz) — dibuat ulang otomatis
+data/gen_cache/
 
 # Local tool & editor settings
 .claude/

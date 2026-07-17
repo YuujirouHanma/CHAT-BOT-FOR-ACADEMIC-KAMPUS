@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings
@@ -31,9 +31,12 @@ class Settings(BaseSettings):
     groq_api_key: SecretStr = SecretStr("")
     hf_api_key: SecretStr = SecretStr("")
     openrouter_api_key: SecretStr = SecretStr("")
+    gemini_api_key: SecretStr = SecretStr("")
 
     # --- Generation LLM ---
-    generation_provider: Literal["openai", "groq", "huggingface", "ollama", "openrouter"] = "huggingface"
+    generation_provider: Literal[
+        "openai", "groq", "huggingface", "ollama", "openrouter", "gemini"
+    ] = "huggingface"
     generation_model: str = "Qwen/Qwen3.5-9B"
     generation_base_url: str | None = None
     generation_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
@@ -94,32 +97,44 @@ class Settings(BaseSettings):
             )
         return self
 
+    # OpenAI-compatible base URL per provider. All providers below expose the
+    # OpenAI chat-completions API shape, so one client class serves them all.
+    PROVIDER_BASE_URLS: ClassVar[dict[str, str]] = {
+        "openai": "https://api.openai.com/v1",
+        "groq": "https://api.groq.com/openai/v1",
+        "huggingface": "https://router.huggingface.co/featherless-ai/v1",
+        "ollama": "http://localhost:11434/v1",
+        "openrouter": "https://openrouter.ai/api/v1",
+        "gemini": "https://generativelanguage.googleapis.com/v1beta/openai/",
+    }
+
+    def base_url_for(self, provider: str) -> str:
+        """OpenAI-compatible base URL for any supported provider."""
+        return self.PROVIDER_BASE_URLS[provider]
+
+    def api_key_for(self, provider: str) -> str:
+        """API key for any supported provider (Ollama needs no real key)."""
+        keys = {
+            "ollama": "ollama",
+            "openai": self.openai_api_key.get_secret_value(),
+            "groq": self.groq_api_key.get_secret_value(),
+            "openrouter": self.openrouter_api_key.get_secret_value(),
+            "gemini": self.gemini_api_key.get_secret_value(),
+            "huggingface": self.hf_api_key.get_secret_value(),
+        }
+        return keys.get(provider, "")
+
     @model_validator(mode="after")
     def _resolve_generation_url(self) -> Settings:
-        """Auto-set base_url if not explicitly provided."""
+        """Auto-set base_url for the default provider if not explicitly provided."""
         if self.generation_base_url is None:
-            urls = {
-                "openai": "https://api.openai.com/v1",
-                "groq": "https://api.groq.com/openai/v1",
-                "huggingface": "https://router.huggingface.co/featherless-ai/v1",
-                "ollama": "http://localhost:11434/v1",
-                "openrouter": "https://openrouter.ai/api/v1",
-            }
-            self.generation_base_url = urls[self.generation_provider]
+            self.generation_base_url = self.PROVIDER_BASE_URLS[self.generation_provider]
         return self
 
     @property
     def generation_api_key(self) -> str:
-        """Return the right API key for the active provider."""
-        if self.generation_provider == "ollama":
-            return "ollama"
-        if self.generation_provider == "openai":
-            return self.openai_api_key.get_secret_value()
-        if self.generation_provider == "groq":
-            return self.groq_api_key.get_secret_value()
-        if self.generation_provider == "openrouter":
-            return self.openrouter_api_key.get_secret_value()
-        return self.hf_api_key.get_secret_value()
+        """API key for the default/active provider."""
+        return self.api_key_for(self.generation_provider)
 
     @property
     def qdrant_url(self) -> str:

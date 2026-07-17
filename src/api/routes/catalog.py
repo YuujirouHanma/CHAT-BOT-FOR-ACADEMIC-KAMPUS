@@ -21,6 +21,11 @@ from src.api.schemas import (
     CourseListResponse,
     MaterialInfo,
     MaterialListResponse,
+    QuizQuestion,
+    QuizResponse,
+    QuizResultItem,
+    QuizSubmitRequest,
+    QuizSubmitResponse,
     StarterQuestionsResponse,
     WeekListResponse,
 )
@@ -83,12 +88,73 @@ async def get_materials(
 async def get_starter_questions(
     content_id: str,
     source_file: str,
+    model: str | None = None,
     pipeline: RAGPipeline = Depends(get_pipeline),
 ) -> StarterQuestionsResponse:
-    """Step 4 — pertanyaan template untuk satu materi (auto-generate + cache)."""
-    questions = await pipeline.starter_questions(content_id, source_file)
+    """Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).
+
+    `model` (query param) opsional — key model dari /models untuk memilih LLM.
+    """
+    questions = await pipeline.starter_questions(content_id, source_file, model=model)
     return StarterQuestionsResponse(
         content_id=content_id,
         source_file=source_file,
         questions=questions,
+    )
+
+
+@router.get(
+    "/materials/{content_id}/{source_file}/quiz",
+    response_model=QuizResponse,
+)
+async def get_quiz(
+    content_id: str,
+    source_file: str,
+    model: str | None = None,
+    pipeline: RAGPipeline = Depends(get_pipeline),
+) -> QuizResponse:
+    """Kuis pilihan ganda untuk satu materi (auto-generate + cache).
+
+    `model` (query param) opsional. Tiap soal: pertanyaan, 4 opsi, answer_index, penjelasan.
+    """
+    quiz = await pipeline.quiz(content_id, source_file, model=model)
+    return QuizResponse(
+        content_id=content_id,
+        source_file=source_file,
+        questions=[QuizQuestion(**q) for q in quiz],
+    )
+
+
+@router.post(
+    "/materials/{content_id}/{source_file}/quiz/submit",
+    response_model=QuizSubmitResponse,
+)
+async def submit_quiz(
+    content_id: str,
+    source_file: str,
+    body: QuizSubmitRequest,
+    pipeline: RAGPipeline = Depends(get_pipeline),
+) -> QuizSubmitResponse:
+    """Nilai jawaban kuis mahasiswa → skor + pembahasan per soal, dan simpan progres.
+
+    `answers` = indeks opsi (0-3) yang dipilih, urut sesuai soal dari GET .../quiz.
+    """
+    try:
+        result = await pipeline.grade_quiz(
+            content_id, source_file, body.answers,
+            session_id=body.session_id, student_id=body.student_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+
+    return QuizSubmitResponse(
+        content_id=content_id,
+        source_file=source_file,
+        total=result["total"],
+        correct=result["correct"],
+        score=result["score"],
+        attempt_id=result["attempt_id"],
+        results=[QuizResultItem(**r) for r in result["results"]],
     )

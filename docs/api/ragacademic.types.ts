@@ -161,8 +161,71 @@ export interface paths {
         /**
          * Get Starter Questions
          * @description Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).
+         *
+         *     `model` (query param) opsional — key model dari /models untuk memilih LLM.
          */
         get: operations["get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catalog/materials/{content_id}/{source_file}/quiz": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Quiz
+         * @description Kuis pilihan ganda untuk satu materi (auto-generate + cache).
+         *
+         *     `model` (query param) opsional. Tiap soal: pertanyaan, 4 opsi, answer_index, penjelasan.
+         */
+        get: operations["get_quiz_catalog_materials__content_id___source_file__quiz_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/catalog/materials/{content_id}/{source_file}/quiz/submit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Submit Quiz
+         * @description Nilai jawaban kuis mahasiswa → skor + pembahasan per soal, dan simpan progres.
+         *
+         *     `answers` = indeks opsi (0-3) yang dipilih, urut sesuai soal dari GET .../quiz.
+         */
+        post: operations["submit_quiz_catalog_materials__content_id___source_file__quiz_submit_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List Models */
+        get: operations["list_models_models_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -368,6 +431,24 @@ export interface components {
             /** Materials */
             materials: components["schemas"]["MaterialInfo"][];
         };
+        /** ModelInfo */
+        ModelInfo: {
+            /** Key */
+            key: string;
+            /** Label */
+            label: string;
+            /** Provider */
+            provider: string;
+            /** Vision */
+            vision: boolean;
+        };
+        /** ModelListResponse */
+        ModelListResponse: {
+            /** Default */
+            default: string;
+            /** Models */
+            models: components["schemas"]["ModelInfo"][];
+        };
         /** QueryRequest */
         QueryRequest: {
             /** Question */
@@ -378,6 +459,10 @@ export interface components {
             content_id?: string | null;
             /** Source Filter */
             source_filter?: string | null;
+            /** Model */
+            model?: string | null;
+            /** Level */
+            level?: ("sederhana" | "standar" | "detail") | null;
         };
         /** QueryResponse */
         QueryResponse: {
@@ -391,6 +476,76 @@ export interface components {
             session_id: string;
             /** Interaction Id */
             interaction_id?: string | null;
+        };
+        /** QuizQuestion */
+        QuizQuestion: {
+            /** Question */
+            question: string;
+            /** Options */
+            options: string[];
+            /** Answer Index */
+            answer_index: number;
+            /**
+             * Explanation
+             * @default
+             */
+            explanation: string;
+        };
+        /** QuizResponse */
+        QuizResponse: {
+            /** Content Id */
+            content_id: string;
+            /** Source File */
+            source_file: string;
+            /** Questions */
+            questions: components["schemas"]["QuizQuestion"][];
+        };
+        /** QuizResultItem */
+        QuizResultItem: {
+            /** Question */
+            question: string;
+            /** Options */
+            options: string[];
+            /** Your Answer */
+            your_answer?: number | null;
+            /** Correct Answer */
+            correct_answer: number;
+            /** Is Correct */
+            is_correct: boolean;
+            /**
+             * Explanation
+             * @default
+             */
+            explanation: string;
+        };
+        /** QuizSubmitRequest */
+        QuizSubmitRequest: {
+            /**
+             * Answers
+             * @description Indeks opsi yang dipilih per soal (urut sesuai soal)
+             */
+            answers: number[];
+            /** Session Id */
+            session_id?: string | null;
+            /** Student Id */
+            student_id?: string | null;
+        };
+        /** QuizSubmitResponse */
+        QuizSubmitResponse: {
+            /** Content Id */
+            content_id: string;
+            /** Source File */
+            source_file: string;
+            /** Total */
+            total: number;
+            /** Correct */
+            correct: number;
+            /** Score */
+            score: number;
+            /** Attempt Id */
+            attempt_id: string;
+            /** Results */
+            results: components["schemas"]["QuizResultItem"][];
         };
         /** SourceInfo */
         SourceInfo: {
@@ -643,7 +798,9 @@ export interface operations {
     };
     get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get: {
         parameters: {
-            query?: never;
+            query?: {
+                model?: string | null;
+            };
             header?: never;
             path: {
                 content_id: string;
@@ -669,6 +826,96 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_quiz_catalog_materials__content_id___source_file__quiz_get: {
+        parameters: {
+            query?: {
+                model?: string | null;
+            };
+            header?: never;
+            path: {
+                content_id: string;
+                source_file: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_quiz_catalog_materials__content_id___source_file__quiz_submit_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                content_id: string;
+                source_file: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["QuizSubmitRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuizSubmitResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_models_models_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelListResponse"];
                 };
             };
         };
