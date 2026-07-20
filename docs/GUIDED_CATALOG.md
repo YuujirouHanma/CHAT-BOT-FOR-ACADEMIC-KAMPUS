@@ -154,6 +154,39 @@ Agar hierarki rapi, kirim 3 field **opsional** ini di `POST /documents/upload`
 
 ---
 
+## Materi video & audio (transkripsi)
+
+Rekaman kuliah (`mp4`, `mkv`, `webm`, `mp3`, `wav`, `m4a`, dll) sekarang **bisa ditanya**.
+Upload lewat endpoint yang sama (`POST /documents/upload`) — backend otomatis:
+
+```
+video/audio → ffmpeg (buang video, mono 16kHz, potong per 10 menit)
+            → Whisper (API OpenAI-compatible: Groq / OpenAI)
+            → transkrip diindex seperti dokumen biasa
+```
+
+Setelah itu rekaman muncul sebagai **materi** di katalog dan bisa ditanya, dibuatkan
+pertanyaan template, maupun kuis — sama seperti PDF/PPTX.
+
+**Prasyarat di server:**
+1. **`ffmpeg` terpasang** di image (sudah ada di `Dockerfile` repo).
+2. `.env`:
+   ```
+   TRANSCRIPTION_PROVIDER=groq        # atau openai / disabled
+   TRANSCRIPTION_MODEL=whisper-large-v3
+   TRANSCRIPTION_LANGUAGE=id
+   ```
+   API key provider-nya (mis. `GROQ_API_KEY`) harus terisi.
+
+**Degradasi aman:** kalau ffmpeg tidak ada, provider `disabled`, atau API key kosong →
+upload **tetap berhasil**, file tersimpan, hanya tidak terindex (ada warning jelas di log).
+Tidak pernah membuat upload gagal.
+
+> Catatan: transkripsi kuliah panjang butuh waktu (audio dipotong per 10 menit lalu
+> ditranskrip berurutan). Satu segmen gagal tidak membatalkan segmen lainnya.
+
+---
+
 ## Backward compatibility
 
 - Endpoint lama (`/chat/ask`, `/documents/upload`, `/browse/*`) **tidak berubah** kontraknya.

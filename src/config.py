@@ -51,6 +51,14 @@ class Settings(BaseSettings):
     # --- Reranker ---
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
 
+    # --- Transcription (video/audio → teks, agar bisa ditanya) ---
+    # Butuh ffmpeg di sistem. "disabled" → file media tetap disimpan tapi tak diindex.
+    transcription_provider: Literal["groq", "openai", "disabled"] = "groq"
+    transcription_model: str = "whisper-large-v3"
+    transcription_language: str = "id"
+    # Audio dipecah agar tiap potongan aman di bawah batas ukuran API.
+    transcription_segment_seconds: int = Field(default=600, ge=60, le=1800)
+
     # --- Qdrant ---
     # local  → embedded on-disk client (QdrantClient(path=...)); no server needed.
     #          Right for dev/tests and single-process runs.

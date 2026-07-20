@@ -18,6 +18,7 @@ from src.indexing.chunker import Chunker
 from src.indexing.embedder import Embedder
 from src.indexing.summarizer import MultimodalSummarizer, enrich_elements
 from src.ingestion.parser import parse_document
+from src.ingestion.transcriber import is_media, parse_media
 from src.retrieval.hybrid_retriever import HybridRetriever
 from src.retrieval.reranker import Reranker
 from src.storage.qdrant_store import QdrantStore
@@ -75,7 +76,11 @@ class RAGPipeline:
     ) -> IndexResult:
         logger.info("=== Indexing {} (content_id={}) ===", file_path.name, content_id)
 
-        elements = parse_document(file_path, content_id=content_id)
+        # Video/audio go through transcription; everything else through the parser.
+        if is_media(file_path):
+            elements = await parse_media(file_path, content_id=content_id)
+        else:
+            elements = parse_document(file_path, content_id=content_id)
         if not elements:
             return IndexResult(file_path.name, 0, 0, 0, content_id=content_id)
 

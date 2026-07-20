@@ -41,7 +41,12 @@ class FileEntry:
 
     @property
     def is_indexable(self) -> bool:
-        return self.category == FileCategory.DOCUMENT
+        """Documents parse directly; video/audio are indexed via transcription."""
+        return self.category in (
+            FileCategory.DOCUMENT,
+            FileCategory.VIDEO,
+            FileCategory.AUDIO,
+        )
 
     @property
     def size_display(self) -> str:
