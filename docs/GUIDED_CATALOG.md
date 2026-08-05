@@ -187,6 +187,31 @@ Tidak pernah membuat upload gagal.
 
 ---
 
+## Troubleshooting: PPTX/DOCX gagal parse dengan `403 Forbidden`
+
+**Gejala:** upload `.pptx`/`.docx` di container error `403 Forbidden`, padahal di
+mesin lokal developer jalan normal.
+
+**Penyebab:** `unstructured` butuh data NLTK (`punkt_tab`, `averaged_perceptron_tagger_eng`)
+untuk tokenisasi teks. Kalau data itu tidak ada, ia mengunduhnya **saat runtime** dari
+`https://utic-public-cf.s3.amazonaws.com/nltk_data_3.8.2.tar.gz` — URL ini sering
+membalas **403** di dalam container. Di laptop developer biasanya sudah ada cache
+NLTK dari pemakaian sebelumnya, makanya "di saya jalan".
+
+**Perbaikan:** data NLTK harus diunduh **saat build**, bukan runtime. Sudah ada di
+`Dockerfile` repo:
+```dockerfile
+ENV NLTK_DATA=/usr/share/nltk_data
+RUN python -m nltk.downloader -d ${NLTK_DATA} punkt_tab averaged_perceptron_tagger_eng
+```
+Kalau tim BE memakai Dockerfile sendiri, **tambahkan 2 baris di atas** setelah
+`pip install`, lalu **rebuild image**.
+
+**Cara cek cepat:** lihat log saat server start —
+`NLTK data OK — document parsing ready` (aman) atau `NLTK data missing (...)` (perlu rebuild).
+
+---
+
 ## Backward compatibility
 
 - Endpoint lama (`/chat/ask`, `/documents/upload`, `/browse/*`) **tidak berubah** kontraknya.

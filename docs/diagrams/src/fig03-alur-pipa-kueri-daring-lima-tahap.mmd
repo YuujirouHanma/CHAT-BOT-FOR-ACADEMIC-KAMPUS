@@ -1,0 +1,68 @@
+flowchart TB
+    Q0["Pertanyaan mahasiswa q<br/>+ content_id, source_filter, model, level"] --> ST1
+
+    subgraph ST1["TAHAP 1 — Dekomposisi Kueri"]
+        A1["LLMGenerator.decompose_query()<br/>temp=0.1, max_tokens=256"]
+        A2["Keluaran JSON berisi:<br/>topik_utama, konsep_kunci,<br/>tipe_pertanyaan, query_diperkaya"]
+        A3{"JSON valid?"}
+        A4["q' ← query_diperkaya"]
+        A5["Fallback: q' ← q<br/>(kegagalan tahap 1 tidak menggagalkan permintaan)"]
+        A1 --> A2 --> A3
+        A3 -- Ya --> A4
+        A3 -- Tidak --> A5
+    end
+
+    ST1 --> ST2
+
+    subgraph ST2["TAHAP 2 — Retrieval Hibrida"]
+        B1["Embedder.embed_query(q')<br/>→ (v_dense, v_sparse)"]
+        B2["Bangun filter Qdrant:<br/>must content_id ∧ must source_file"]
+        B3["query_points dengan Prefetch ganda<br/>+ FusionQuery(RRF), limit = 20"]
+        B4{"Sparse tersedia?"}
+        B5["Degradasi: pencarian dense-only<br/>(tangkap KeyError dari IDF rescoring)"]
+        B1 --> B2 --> B4
+        B4 -- Ya --> B3
+        B4 -- Tidak --> B5
+    end
+
+    ST2 --> D1{"Kandidat kosong?"}
+    D1 -- Ya --> Z1["Jawaban penolakan terkendali:<br/>'Materi yang tersedia tidak mencakup informasi tersebut.'<br/>sources kosong, recommendations kosong<br/>→ tetap dicatat ke HITL"]
+    D1 -- Tidak --> ST3
+
+    subgraph ST3["TAHAP 3 — Reranking"]
+        C1["bge-reranker-v2-m3 (cross-encoder)<br/>skor pasangan (q, teks_kandidat), normalize=True"]
+        C2["Urut menurun, ambil 5 teratas<br/>(recall@20 → precision@5)"]
+        C1 --> C2
+    end
+
+    ST3 --> ST4
+
+    subgraph ST4["TAHAP 4 — Perakitan Konteks & Generasi"]
+        E1["format_retrieval_results()"]
+        E2{"element_type tiap chunk"}
+        E3["TABLE → injeksikan raw_html<br/>(angka dibaca dari data asli, bukan ringkasan)"]
+        E4["IMAGE → teks deskripsi inline<br/>+ blok vision image_url data:mime;base64"]
+        E5["TEXT → teks chunk apa adanya"]
+        E6["Tiap blok diberi label sitasi [Sumber N]"]
+        E7["build_system_prompt(level)<br/>level: sederhana, standar, atau detail"]
+        E8["chat.completions.create()<br/>temp=0.2, max_tokens=1024"]
+        E1 --> E2
+        E2 --> E3 --> E6
+        E2 --> E4 --> E6
+        E2 --> E5 --> E6
+        E6 --> E7 --> E8
+    end
+
+    ST4 --> ST5
+
+    subgraph ST5["TAHAP 5 — Pembangkitan Pertanyaan Lanjutan"]
+        F1["generate_followup(q, dq, jawaban)<br/>temp=0.5, max_tokens=256<br/>panggilan TERPISAH dari jawaban utama"]
+        F2["Wajib 3 pertanyaan dari 3 TIPE berbeda:<br/>definisi, contoh, perbandingan,<br/>sebab-akibat, proses, analisis"]
+        F3["Gagal → daftar kosong<br/>(tidak menggagalkan jawaban)"]
+        F1 --> F2
+        F1 -.-> F3
+    end
+
+    ST5 --> L1["log_interaction() → conversation_logs.jsonl<br/>mengembalikan interaction_id"]
+    L1 --> R1["QueryResult berisi: answer, sources,<br/>recommendations, interaction_id, decomposition"]
+    Z1 --> R1

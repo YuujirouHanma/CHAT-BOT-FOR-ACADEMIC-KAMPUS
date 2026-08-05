@@ -1,0 +1,31 @@
+flowchart TB
+    subgraph ALUR_A["ALUR A — Indexing (luring, sekali per materi)"]
+        IN["Materi kuliah diunggah<br/>PDF · DOCX · PPTX · XLSX · TXT · CSV<br/>rekaman kuliah: video · audio"]
+        ING["INGESTION<br/>Unstructured partition() → teks, tabel, gambar<br/>PDF hasil pindai → fallback OCR (ind + eng)<br/>Video/audio → ffmpeg + Whisper → transkrip"]
+        ENR["PENGAYAAN MULTIMODAL<br/>Tabel dan gambar diringkas LLM jadi teks<br/>agar bisa ditelusuri.<br/>Data asli (HTML tabel, base64 gambar) TETAP disimpan"]
+        CHK["CHUNKING + METADATA + EMBEDDING<br/>SentenceSplitter 512/64<br/>cap course_id · week · source_file<br/>BGE-M3 satu forward pass: dense 1024-d + sparse"]
+    end
+
+    DB[("QDRANT — koleksi classroom_docs<br/>vektor dense (Cosine) + sparse (modifier IDF)<br/>payload 12 medan metadata")]
+
+    subgraph ALUR_B["ALUR B — Tanya jawab (daring, tiap pertanyaan)"]
+        Q["Pertanyaan mahasiswa<br/>materi dipilih lewat katalog terpandu<br/>mata kuliah → minggu → materi"]
+        DEC["TAHAP 1 — Dekomposisi kueri (LLM)<br/>pertanyaan pendek/ambigu → kueri diperkaya"]
+        RET["TAHAP 2–3 — Retrieval hibrida + reranking<br/>dense + sparse difusikan RRF → 20 kandidat<br/>cross-encoder menyaring → 5 potongan terbaik"]
+        GEN["TAHAP 4–5 — Perakitan konteks + generasi (LLM)<br/>tabel HTML asli dan gambar diinjeksikan ke konteks<br/>tiap sumber diberi label Sumber N<br/>plus 3 pertanyaan lanjutan"]
+        ANS["Respons API<br/>jawaban bersitasi + daftar sumber<br/>+ rekomendasi pertanyaan lanjutan"]
+    end
+
+    LOG[("Log HITL — berkas JSONL<br/>interaksi · umpan balik · nilai kuis")]
+    EXT{{"Layanan model eksternal<br/>OpenAI · Groq · OpenRouter · Gemini<br/>HuggingFace · Ollama · Whisper ASR"}}
+
+    IN --> ING --> ENR --> CHK --> DB
+    Q --> DEC --> RET
+    DB --> RET
+    RET --> GEN --> ANS
+    ANS --> LOG
+
+    ING -.-> EXT
+    ENR -.-> EXT
+    DEC -.-> EXT
+    GEN -.-> EXT

@@ -1,0 +1,42 @@
+stateDiagram-v2
+    [*] --> DaftarMataKuliah
+
+    DaftarMataKuliah: GET /catalog/courses
+    note right of DaftarMataKuliah
+        Scroll payload Qdrant medan course_id/course_name.
+        Nama kustom (dikirim saat unggah) menang atas
+        nama hasil humanize_course() otomatis.
+    end note
+
+    DaftarMataKuliah --> DaftarMinggu: pilih course_id
+    DaftarMinggu: GET /catalog/courses/COURSE/weeks
+    DaftarMinggu --> DaftarMataKuliah: 404 tidak ada minggu terindeks
+
+    DaftarMinggu --> DaftarMateri: pilih week
+    DaftarMateri: GET /catalog/courses/COURSE/weeks/W/materials
+    DaftarMateri --> DaftarMinggu: 404 tidak ada materi
+
+    DaftarMateri --> MateriTerpilih: pilih source_file lalu dapat content_id
+
+    state MateriTerpilih {
+        [*] --> Cabang
+        Cabang --> PertanyaanPembuka: GET starter-questions
+        Cabang --> Kuis: GET quiz
+        Cabang --> TanyaBebas: POST /chat/ask
+
+        PertanyaanPembuka: 5 pertanyaan pembuka hasil LLM
+        Kuis: 5 soal pilihan ganda, 4 opsi
+        Penilaian: skor = 100 x benar/total plus pembahasan per soal
+
+        PertanyaanPembuka --> TanyaBebas: klik satu pertanyaan
+        Kuis --> Penilaian: POST quiz/submit
+        Penilaian --> [*]: dicatat ke quiz_attempts.jsonl
+        TanyaBebas --> TanyaBebas: pertanyaan lanjutan dari rekomendasi
+    }
+
+    note left of MateriTerpilih
+        Cache on-disk: data/gen_cache/KIND_HASH.json
+        kunci = SHA-1(kind + content_id + source_file), 16 heksa pertama.
+        Penilaian memakai kuis TER-CACHE yang sama
+        dengan yang diterima mahasiswa, sehingga kunci jawaban konsisten.
+    end note

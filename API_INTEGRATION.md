@@ -59,7 +59,15 @@ Tidak butuh auth. Cek status service + LLM aktif.
 ---
 
 ### `POST /chat/ask`
-Tanya jawab terhadap materi yang sudah diindex.
+Tanya jawab terhadap materi yang sudah diindex — **dan** alur guided yang menuntun
+mahasiswa memilih mata kuliah → minggu → materi.
+
+Satu endpoint ini punya **dua bentuk balasan**, dibedakan oleh field `mode`:
+
+| `mode` | Arti | Yang harus dirender |
+|---|---|---|
+| `"answer"` | `answer` adalah jawaban atas pertanyaan | jawaban + `sources` + `recommendations` |
+| `"choices"` | `answer` adalah pertanyaan balik chatbot | pesan + `choices` sebagai **tombol** |
 
 **Request body:**
 ```json
@@ -67,10 +75,20 @@ Tanya jawab terhadap materi yang sudah diindex.
   "question": "Apa itu Artificial Intelligence?",
   "session_id": null,
   "content_id": "kka-minggu-1",
-  "source_filter": null
+  "source_filter": null,
+  "guided": true,
+  "course_id": null,
+  "week": null
 }
 ```
 `session_id` boleh `null` di request pertama — server akan generate dan mengembalikannya; kirim balik nilai ini di request lanjutan supaya histori sesi tersambung.
+
+`guided` (default `true`) mengaktifkan tanya-balik. Set `false` kalau klien hanya
+ingin tanya-jawab murni tanpa pernah dituntun.
+
+`course_id` / `week` diisi saat mahasiswa **mengklik tombol pilihan**. Tidak wajib:
+mengirim label tombol sebagai `question` biasa juga sudah dikenali server. Mengirim
+keduanya adalah yang paling aman.
 
 **Response 200:**
 ```json
@@ -88,7 +106,17 @@ Tanya jawab terhadap materi yang sudah diindex.
   ],
   "recommendations": ["Pertanyaan lanjutan 1?", "Pertanyaan lanjutan 2?"],
   "session_id": "uuid-sesi",
-  "interaction_id": "hitl_20260701_..."
+  "interaction_id": "hitl_20260701_...",
+  "mode": "answer",
+  "step": "answer",
+  "choices": [],
+  "context": {
+    "course_id": "kka",
+    "course_name": "KKA",
+    "week": 1,
+    "content_id": "kka-minggu-1",
+    "source_file": "materi6.pdf"
+  }
 }
 ```
 Simpan `interaction_id` kalau mau kirim feedback lewat `/chat/feedback`.

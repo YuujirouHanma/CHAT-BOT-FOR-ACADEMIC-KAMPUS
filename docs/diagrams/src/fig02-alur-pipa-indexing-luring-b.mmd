@@ -1,0 +1,27 @@
+flowchart TB
+    IN(["Dari panel (a): elements tidak kosong"]) --> S1["enrich_elements()<br/>asyncio.Semaphore(5)"]
+
+    S1 --> S2{"element_type"}
+    S2 -- TEXT --> S5["Lewati<br/>(content sudah embeddable)"]
+    S2 -- TABLE --> S3["summarize_table(raw_html)<br/>ringkas 2–4 kalimat, temp 0.2, 512 tok<br/>tenacity: 3 percobaan, backoff 1–8 s"]
+    S2 -- IMAGE --> S4["describe_image(base64)<br/>prompt vision 3–5 kalimat, detail='low'<br/>tenacity: 3 percobaan, backoff 1–8 s"]
+
+    S3 --> S8
+    S4 --> S8
+    S8["Berhasil → element.summary ← ringkasan<br/>Gagal → elemen lolos TANPA summary,<br/>embeddable_text() jatuh ke .content"]
+
+    S5 --> K1
+    S8 --> K1
+
+    K1{"Chunker.chunk()<br/>element_type"}
+    K1 -- TEXT --> K3["SentenceSplitter<br/>chunk_size=512, overlap=64<br/>→ n potongan, batas kalimat dijaga"]
+    K1 -- "TABLE / IMAGE" --> K4["1 chunk = embeddable_text()<br/>raw_html & image_base64 diteruskan<br/>ringkasan TIDAK dipecah<br/>teks kosong ⇒ chunk dibuang + warning"]
+
+    K3 --> C1
+    K4 --> C1
+    C1["resolve_course_week()<br/>pola content_id 'course-minggu-N'; juga week / w<br/>nilai eksplisit dari form menang atas hasil parsing<br/>cap course_id / course_name / week pada SETIAP chunk"]
+
+    C1 --> M1["Embedder.embed_chunks() — asyncio.to_thread, batch=12<br/>BGE-M3 satu forward pass → dense_vecs (1024-d)<br/>+ lexical_weights (sparse: token_id → bobot)"]
+    M1 --> Q1["QdrantStore.upsert_chunks()<br/>batch 64 titik, wait=True"]
+    Q1 --> Q2[("Koleksi classroom_docs<br/>vektor 'dense' (Cosine) + 'sparse' (modifier IDF)<br/>payload: 12 medan metadata")]
+    Q2 --> Z1["IndexResult(elements, chunks, points, content_id)"]

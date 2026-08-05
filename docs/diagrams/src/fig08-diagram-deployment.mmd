@@ -1,0 +1,36 @@
+flowchart TB
+    subgraph HOST["Host / Server"]
+        subgraph NET["Jaringan Docker Compose"]
+            subgraph SVC1["Kontainer: ragacademic-backend"]
+                A1["python:3.12-slim"]
+                A2["Paket sistem:<br/>tesseract-ocr + tesseract-ocr-ind<br/>poppler-utils · libmagic1<br/>libgl1 · libglib2.0-0 · ffmpeg"]
+                A3["NLTK_DATA=/usr/share/nltk_data<br/>punkt_tab + averaged_perceptron_tagger_eng<br/>(diunduh saat BUILD, bukan runtime)"]
+                A4["uvicorn src.api.main:app<br/>0.0.0.0:8000"]
+                A5["Bobot model diunduh saat run pertama:<br/>BGE-M3 ≈1 GB · reranker ≈600 MB"]
+            end
+
+            subgraph SVC2["Kontainer: classroom-rag-qdrant"]
+                B1["qdrant/qdrant:v1.12.4"]
+                B2["REST :6333 · gRPC :6334"]
+                B3["healthcheck tiap 10 s"]
+            end
+        end
+
+        subgraph VOL["Volume / Bind Mount"]
+            V1[("./storage → /app/storage<br/>materi persisten")]
+            V2[("./data → /app/data<br/>log HITL, gen_cache, unggahan sementara")]
+            V3[("qdrant_storage (volume bernama)<br/>→ /qdrant/storage")]
+        end
+    end
+
+    CL["Klien HTTP"] -->|":8000"| A4
+    A4 -->|"QDRANT_MODE=server<br/>QDRANT_HOST=qdrant:6333"| B2
+    SVC1 --- V1
+    SVC1 --- V2
+    SVC2 --- V3
+
+    A4 -.->|"HTTPS"| EXT{{"API eksternal:<br/>OpenAI · Groq · OpenRouter<br/>Gemini · HuggingFace"}}
+
+    subgraph ALT["Mode alternatif (pengembangan)"]
+        D1["QDRANT_MODE=local<br/>QdrantClient(path='./qdrant_storage')<br/>proses tunggal, tanpa server"]
+    end

@@ -1,0 +1,25 @@
+flowchart TB
+    A["Berkas masuk<br/>storage/{content_id}/{nama}"] --> B{"is_media(ext)?<br/>video: mp4,mkv,mov,…<br/>audio: mp3,wav,m4a,…"}
+
+    B -- Ya --> T1["validate_file()<br/>ada · bukan direktori · ≠0 B · ≤100 MB"]
+    T1 --> T2{"provider ≠ disabled<br/>∧ API key ada<br/>∧ ffmpeg di PATH?"}
+    T2 -- Tidak --> T9["Kembalikan daftar kosong<br/>(berkas tersimpan, tidak terindeks)"]
+    T2 -- Ya --> T3["ffmpeg: -vn, mono, 16 kHz, 32 kbps<br/>segmentasi 600 s → seg_%03d.mp3"]
+    T3 --> T4["Whisper large-v3 per segmen<br/>(bahasa: id) — segmen gagal dilewati"]
+    T4 --> T5["Gabung transkrip<br/>→ 1 ParsedElement bertipe TEXT"]
+    T5 --> E
+
+    B -- Tidak --> P1["validate_indexable()<br/>ekstensi termasuk: pdf, docx, pptx, txt, md,<br/>csv, xlsx, html, rtf, rst, epub, tsv"]
+    P1 --> P2["Unstructured partition()<br/>PDF: strategy='fast' (pdfminer)<br/>Lainnya: strategy='auto'"]
+    P2 --> P3{"PDF ∧<br/>Σ|teks| < 20 karakter?"}
+    P3 -- Ya --> P4["Fallback OCR<br/>strategy='ocr_only'<br/>languages=[ind, eng]"]
+    P4 --> P5{"OCR menghasilkan<br/>lebih banyak teks?"}
+    P5 -- Ya --> P6
+    P5 -- Tidak --> P6
+    P3 -- Tidak --> P6["_assemble_elements()"]
+
+    P6 --> P7["Klasifikasi elemen:<br/>· Table → simpan text_as_html<br/>· Image → simpan image_base64 (tanpa base64 ⇒ dibuang)<br/>· Teks → di-buffer & digabung sampai penanda berikutnya"]
+    P7 --> E
+
+    E{"elements kosong?"} -- Ya --> Z0["IndexResult(0,0,0)"]
+    E -- Tidak --> GO(["Lanjut ke panel (b)"])

@@ -1,0 +1,75 @@
+sequenceDiagram
+    autonumber
+    actor U as Dosen / Tim BE
+    participant API as POST /documents/upload
+    participant AU as verify_api_key
+    participant FS as Filesystem
+    participant PL as RAGPipeline
+    participant PR as parser / transcriber
+    participant EX as Penyedia LLM
+    participant SM as summarizer
+    participant CH as Chunker
+    participant EM as Embedder (BGE-M3)
+    participant QD as QdrantStore
+
+    U->>API: multipart: file, content_id, course_id, course_name, week
+    API->>AU: X-API-Key
+    alt kunci tidak valid
+        AU-->>U: 401 Unauthorized
+    end
+    AU-->>API: lolos
+
+    alt content_id diberikan
+        API->>FS: tulis storage/{content_id}/{nama}
+    else tanpa content_id
+        API->>FS: tulis data/uploads/{uuid}_{nama}
+    end
+    FS-->>API: target_path
+
+    API->>PL: index_document(path, content_id, course_id, course_name, week)
+
+    alt berkas media (video/audio)
+        PL->>PR: parse_media()
+        PR->>PR: ffmpeg → segmen mp3 mono 16 kHz / 600 s
+        loop tiap segmen
+            PR->>EX: audio.transcriptions.create (whisper-large-v3)
+            EX-->>PR: teks segmen
+        end
+        PR-->>PL: [1 elemen TEXT] atau [ ]
+    else dokumen
+        PL->>PR: parse_document()
+        PR->>PR: Unstructured partition()
+        opt PDF hasil pindai (< 20 karakter)
+            PR->>PR: ulang dengan strategy='ocr_only' (ind+eng)
+        end
+        PR-->>PL: [ParsedElement] (TEXT / TABLE / IMAGE)
+    end
+
+    alt tidak ada elemen
+        PL-->>API: IndexResult(0,0,0)
+        API-->>U: 201 dengan statistik nol
+    end
+
+    PL->>SM: enrich_elements(elements)
+    par maks. 5 panggilan serentak
+        SM->>EX: ringkas tabel (HTML)
+        SM->>EX: deskripsikan gambar (vision)
+    end
+    EX-->>SM: ringkasan
+    Note over SM: Kegagalan per elemen dicatat,<br/>elemen tetap lolos tanpa summary
+    SM-->>PL: elemen diperkaya
+
+    PL->>CH: chunk(enriched)
+    CH-->>PL: [Chunk] (TEXT dipecah, TABLE/IMAGE utuh)
+
+    PL->>PL: resolve_course_week() → cap course_id/course_name/week
+    PL->>EM: embed_chunks(chunks)
+    EM->>EM: to_thread → encode(batch=12, dense+sparse)
+    EM-->>PL: chunks berisi embedding
+
+    PL->>QD: upsert_chunks() (batch 64, wait=True)
+    QD-->>PL: jumlah titik tersimpan
+    PL-->>API: IndexResult
+    API-->>U: 201 {source_file, elements_parsed, chunks_created, points_stored}
+
+    Note over API,FS: Pada kegagalan indexing, berkas target di-unlink<br/>agar storage tidak menyimpan sisa yang tak terindeks

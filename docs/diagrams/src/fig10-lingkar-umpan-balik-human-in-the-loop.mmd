@@ -1,0 +1,19 @@
+flowchart LR
+    Q["Interaksi tanya-jawab"] --> L1["log_interaction()<br/>conversation_logs.jsonl"]
+    L1 --> ID["interaction_id dikembalikan ke klien"]
+    ID --> FB["POST /chat/feedback<br/>rating, issues, comment"]
+    FB --> L2["log_feedback()<br/>student_feedback_logs.jsonl"]
+
+    QZ["Pengerjaan kuis"] --> L3["log_quiz_attempt()<br/>quiz_attempts.jsonl"]
+
+    L1 --> AN["Analisis luring oleh dosen/asisten"]
+    L2 --> AN
+    L3 --> AN
+
+    AN --> O1["Validasi kualitas jawaban<br/>(akurasi, sitasi, halusinasi)"]
+    AN --> O2["Identifikasi celah materi<br/>(pertanyaan tanpa kandidat retrieval)"]
+    AN --> O3["Dataset kandidat untuk fine-tuning"]
+    AN --> O4["Analitik progres belajar dari skor kuis"]
+
+    O2 -.->|"unggah materi baru"| Q
+    O1 -.->|"perbaikan prompt / parameter"| Q

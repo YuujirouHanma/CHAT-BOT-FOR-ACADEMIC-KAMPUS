@@ -1,0 +1,80 @@
+erDiagram
+    direction LR
+    PARSED_ELEMENT ||--o{ CHUNK : "dipecah menjadi"
+    CHUNK ||--|| QDRANT_POINT : "dimaterialisasi sebagai"
+    COURSE ||--o{ WEEK : memiliki
+    WEEK ||--o{ MATERIAL : memiliki
+    MATERIAL ||--o{ CHUNK : "sumber dari"
+    INTERACTION ||--o{ FEEDBACK : "menerima"
+    MATERIAL ||--o{ QUIZ_ATTEMPT : "diujikan pada"
+
+    PARSED_ELEMENT {
+        string element_id PK
+        enum element_type "text|table|image"
+        string content
+        string raw_html "khusus tabel"
+        string image_base64 "khusus gambar"
+        string summary "hasil LLM, untuk retrieval"
+        string source_file
+        int page_number
+        string content_id
+    }
+
+    CHUNK {
+        string chunk_id PK
+        string text "teks yang disematkan"
+        string parent_element_id FK
+        enum element_type
+        string source_file
+        int page_number
+        int chunk_index
+        string content_id
+        string course_id
+        string course_name
+        int week
+        string raw_html
+        string image_base64
+        float_array dense_embedding "1024-d"
+        map sparse_embedding "token_id → bobot"
+    }
+
+    QDRANT_POINT {
+        uuid id PK "= chunk_id"
+        vector dense "bernama 'dense', Cosine"
+        sparse_vector sparse "bernama 'sparse', modifier IDF"
+        json payload "12 medan metadata"
+    }
+
+    INTERACTION {
+        string interaction_id PK "hitl_YYYYmmdd_HHMMSS_xxxxxxxx"
+        datetime timestamp
+        string session_id
+        string content_id
+        string question
+        json decomposition
+        string answer
+        json sources
+        json recommendations
+        float elapsed_seconds
+    }
+
+    FEEDBACK {
+        string feedback_id PK
+        string interaction_id FK
+        datetime timestamp
+        string rating
+        json issues
+        string comment
+    }
+
+    QUIZ_ATTEMPT {
+        string attempt_id PK
+        datetime timestamp
+        string session_id
+        string student_id
+        string content_id
+        string source_file
+        int correct
+        int total
+        float score
+    }

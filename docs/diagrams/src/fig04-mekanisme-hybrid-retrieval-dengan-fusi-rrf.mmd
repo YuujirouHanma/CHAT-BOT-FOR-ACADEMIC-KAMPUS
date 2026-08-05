@@ -1,0 +1,23 @@
+flowchart LR
+    Q["Kueri diperkaya q'"] --> BM["BGE-M3<br/>SATU forward pass"]
+    BM --> DV["v_dense ∈ ℝ¹⁰²⁴"]
+    BM --> SV["v_sparse = {(token_id, bobot)}"]
+
+    DV --> PF1["Prefetch A<br/>using='dense'<br/>metrik: Cosine<br/>limit = 2 × top_k = 40"]
+    SV --> PF2["Prefetch B<br/>using='sparse'<br/>modifier: IDF<br/>limit = 2 × top_k = 40"]
+
+    FL["Filter payload<br/>must: content_id<br/>must: source_file"] --> PF1
+    FL --> PF2
+
+    PF1 --> RA["Peringkat dense R_d"]
+    PF2 --> RB["Peringkat sparse R_s"]
+
+    RA --> RRF["FusionQuery(Fusion.RRF)<br/>dieksekusi di sisi server Qdrant"]
+    RB --> RRF
+
+    RRF --> TK["top_k = 20 kandidat<br/>berisi chunk_id, score, payload"]
+    TK --> RR["Cross-encoder bge-reranker-v2-m3<br/>skor(q, teks) ternormalisasi 0 sampai 1"]
+    RR --> FIN["rerank_top_k = 5<br/>diurutkan menurun"]
+
+    ERR["KeyError('sparse') dari _rescore_idf<br/>saat indeks sparse masih kosong"] -.-> FB["Degradasi anggun:<br/>pencarian dense-only"]
+    FB -.-> TK

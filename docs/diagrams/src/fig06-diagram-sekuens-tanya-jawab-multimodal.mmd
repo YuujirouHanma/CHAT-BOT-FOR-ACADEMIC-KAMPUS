@@ -1,0 +1,65 @@
+sequenceDiagram
+    autonumber
+    actor S as Mahasiswa
+    participant API as POST /chat/ask
+    participant SE as SessionStore
+    participant PL as RAGPipeline
+    participant GE as LLMGenerator
+    participant MR as model_registry
+    participant RT as HybridRetriever
+    participant EM as Embedder
+    participant QD as Qdrant
+    participant RK as Reranker
+    participant PM as prompts
+    participant HL as hitl.logger
+
+    S->>API: {question, content_id, source_filter, session_id, model, level}
+    API->>SE: get_or_create(session_id)
+    SE-->>API: Session (TTL 3600 s)
+    API->>SE: set_context(content_id, source_filter)
+    Note over SE: Ganti content_id ⇒ source_filter direset<br/>agar tidak menyaring dokumen milik materi lain
+
+    API->>PL: query(question, content_id, source_filter, session_id, model, level)
+
+    PL->>GE: decompose_query(question, model)
+    GE->>MR: get(model) → (provider, model_id)
+    MR-->>GE: ModelSpec, atau None sehingga jatuh ke provider default
+    GE-->>PL: dq{topik_utama, konsep_kunci, tipe_pertanyaan, query_diperkaya}
+
+    PL->>RT: retrieve(q', content_id, source_filter)
+    RT->>EM: embed_query(q')
+    EM-->>RT: (dense 1024-d, sparse)
+    RT->>QD: query_points(Prefetch dense+sparse, RRF, limit 20)
+    QD-->>RT: 20 kandidat + payload
+    alt tidak ada kandidat
+        RT-->>PL: [ ]
+        PL->>HL: log_interaction(jawaban penolakan)
+        PL-->>API: QueryResult(answer='Materi ... tidak mencakup ...')
+        API-->>S: 200 tanpa sumber
+    end
+    RT->>RK: rerank(q', kandidat, top_k=5)
+    RK-->>RT: 5 teratas + rerank_score
+    RT-->>PL: hasil terurut
+
+    PL->>PM: format_retrieval_results()
+    PM-->>PL: FormattedContext{text_block, image_payloads}
+    Note over PM: Tabel → raw_html asli<br/>Gambar → deskripsi + payload vision<br/>Tiap blok berlabel [Sumber N]
+
+    PL->>GE: generate(question, context, model, level)
+    GE->>GE: susun pesan multimodal bila ada gambar
+    GE-->>PL: jawaban (dengan sitasi [Sumber N])
+
+    PL->>GE: generate_followup(question, dq, jawaban)
+    GE-->>PL: 3 pertanyaan lanjutan bertipe berbeda
+
+    PL->>HL: log_interaction(...) → conversation_logs.jsonl
+    HL-->>PL: interaction_id
+    PL-->>API: QueryResult
+    API->>SE: add_turn('user'), add_turn('assistant')
+    API-->>S: {answer, sources[ ], recommendations[ ], session_id, interaction_id}
+
+    opt Umpan balik mahasiswa
+        S->>API: POST /chat/feedback {interaction_id, rating, issues, comment}
+        API->>HL: log_feedback() → student_feedback_logs.jsonl
+        API-->>S: 204 No Content
+    end

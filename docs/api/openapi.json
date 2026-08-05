@@ -801,6 +801,99 @@
         ],
         "title": "Body_upload_document_documents_upload_post"
       },
+      "ChatContext": {
+        "properties": {
+          "course_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Id"
+          },
+          "course_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Name"
+          },
+          "week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "source_file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source File"
+          }
+        },
+        "type": "object",
+        "title": "ChatContext",
+        "description": "Konteks yang sedang aktif — dipakai klien menampilkan breadcrumb."
+      },
+      "ChoiceInfo": {
+        "properties": {
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "value": {
+            "type": "string",
+            "title": "Value"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "course",
+              "week",
+              "material",
+              "question",
+              "quiz"
+            ],
+            "title": "Kind"
+          }
+        },
+        "type": "object",
+        "required": [
+          "label",
+          "value",
+          "kind"
+        ],
+        "title": "ChoiceInfo",
+        "description": "Satu pilihan yang bisa diklik mahasiswa di chat."
+      },
       "ContentListResponse": {
         "properties": {
           "contents": {
@@ -1193,6 +1286,36 @@
               }
             ],
             "title": "Level"
+          },
+          "guided": {
+            "type": "boolean",
+            "title": "Guided",
+            "default": true
+          },
+          "course_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Id"
+          },
+          "week": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 52.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week"
           }
         },
         "type": "object",
@@ -1235,6 +1358,38 @@
               }
             ],
             "title": "Interaction Id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "answer",
+              "choices"
+            ],
+            "title": "Mode",
+            "default": "answer"
+          },
+          "step": {
+            "type": "string",
+            "enum": [
+              "course",
+              "week",
+              "material",
+              "question",
+              "answer",
+              "quiz"
+            ],
+            "title": "Step",
+            "default": "answer"
+          },
+          "choices": {
+            "items": {
+              "$ref": "#/components/schemas/ChoiceInfo"
+            },
+            "type": "array",
+            "title": "Choices"
+          },
+          "context": {
+            "$ref": "#/components/schemas/ChatContext"
           }
         },
         "type": "object",

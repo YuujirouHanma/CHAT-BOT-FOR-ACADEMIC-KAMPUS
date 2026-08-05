@@ -1,0 +1,59 @@
+flowchart TB
+    subgraph L1["LAPIS 1 — Klien"]
+        C1["Aplikasi Frontend (Tim BE / PHP)<br/>Klien uji: cURL · Postman · Swagger UI"]
+    end
+
+    subgraph L2["LAPIS 2 — Antarmuka Layanan (FastAPI, port 8000)"]
+        MW["Middleware<br/>CORS + verify_api_key (X-API-Key)"]
+        RU["Router unggah<br/>/documents/upload<br/>/documents/index-batch"]
+        RC["Router chat<br/>/chat/ask · /chat/feedback"]
+        RK["Router katalog & telusur<br/>/catalog/* · /browse/*<br/>/models · /health"]
+        SS["SessionStore<br/>in-memory, TTL 3600 s"]
+    end
+
+    subgraph L3["LAPIS 3 — Orkestrasi: RAGPipeline"]
+        P1["index_document()"]
+        P2["query()"]
+        P3["starter_questions()<br/>quiz() · grade_quiz()"]
+    end
+
+    subgraph L4["LAPIS 4 — Modul Pemrosesan"]
+        M1["Ingestion<br/>validators · parser (Unstructured)<br/>transcriber (ffmpeg + Whisper)"]
+        M2["Indexing<br/>summarizer · chunker<br/>embedder (BGE-M3)"]
+        M3["Retrieval<br/>hybrid_retriever<br/>reranker (cross-encoder)"]
+        M4["Generation<br/>LLMGenerator (multi-provider)<br/>prompts · parser JSON"]
+        M5["Observability<br/>hitl.logger · gen_cache"]
+    end
+
+    subgraph L5["LAPIS 5 — Persistensi & Layanan Eksternal"]
+        D1[("Qdrant<br/>classroom_docs<br/>dense + sparse")]
+        D2[("Filesystem<br/>storage/{content_id}/")]
+        D3[("data/hitl_logs/*.jsonl<br/>data/gen_cache/*.json")]
+        E1{{"Penyedia LLM<br/>OpenAI · Groq · OpenRouter<br/>Gemini · HuggingFace · Ollama"}}
+        E2{{"Whisper ASR<br/>Groq / OpenAI"}}
+    end
+
+    C1 --> MW
+    MW --> RU
+    MW --> RC
+    MW --> RK
+    RC --> SS
+
+    RU --> P1
+    RC --> P2
+    RK --> P3
+
+    P1 --> M1
+    P1 --> M2
+    P2 --> M3
+    P2 --> M4
+    P2 --> M5
+    P3 --> M5
+
+    M1 --> D2
+    M1 -.-> E2
+    M2 --> D1
+    M2 -.-> E1
+    M3 --> D1
+    M4 -.-> E1
+    M5 --> D3
