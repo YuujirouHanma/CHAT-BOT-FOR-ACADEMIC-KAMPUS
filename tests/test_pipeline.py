@@ -242,6 +242,26 @@ class TestQuery:
         )
 
     @pytest.mark.asyncio
+    async def test_retrieval_uses_enriched_query(self) -> None:
+        """Pencarian memakai query hasil pengayaan, bukan pertanyaan mentah."""
+        pipeline, mocks = _make_pipeline()
+        mocks["generator"].decompose_query = AsyncMock(
+            return_value={
+                "topik_utama": "perulangan",
+                "konsep_kunci": ["for", "while"],
+                "query_diperkaya": "penjelasan lengkap konsep perulangan iterasi "
+                                   "for while dalam pemrograman beserta contohnya",
+            }
+        )
+        retrieve_mock = AsyncMock(return_value=[])
+        pipeline._retriever.retrieve = retrieve_mock  # type: ignore[method-assign]
+
+        await pipeline.query("apa itu perulangan?")
+
+        assert retrieve_mock.await_args is not None
+        assert retrieve_mock.await_args.kwargs["query"].startswith("penjelasan lengkap")
+
+    @pytest.mark.asyncio
     async def test_generator_receives_formatted_context(self) -> None:
         pipeline, mocks = _make_pipeline()
         retriever_results = [

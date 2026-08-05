@@ -14,6 +14,14 @@ class QueryRequest(BaseModel):
     source_filter: str | None = Field(default=None, max_length=255)
     model: str | None = Field(default=None, max_length=64)  # registry key; None = default
     level: Literal["sederhana", "standar", "detail"] | None = None  # gaya jawaban
+    # Guided navigation: chatbot menuntun mahasiswa memilih mata kuliah → minggu →
+    # materi lewat pilihan yang bisa diklik. Matikan (False) kalau klien ingin
+    # perilaku tanya-jawab murni tanpa tanya-balik.
+    guided: bool = True
+    # Diisi klien saat mahasiswa mengklik tombol pilihan. Opsional — mengirim
+    # label tombol sebagai `question` biasa juga sudah dikenali.
+    course_id: str | None = Field(default=None, max_length=128)
+    week: int | None = Field(default=None, ge=1, le=52)
 
 
 class SourceInfo(BaseModel):
@@ -25,12 +33,35 @@ class SourceInfo(BaseModel):
     rerank_score: float | None = None
 
 
+class ChoiceInfo(BaseModel):
+    """Satu pilihan yang bisa diklik mahasiswa di chat."""
+    label: str
+    value: str
+    kind: Literal["course", "week", "material", "question", "quiz"]
+
+
+class ChatContext(BaseModel):
+    """Konteks yang sedang aktif — dipakai klien menampilkan breadcrumb."""
+    course_id: str | None = None
+    course_name: str | None = None
+    week: int | None = None
+    content_id: str | None = None
+    source_file: str | None = None
+
+
 class QueryResponse(BaseModel):
     answer: str
     sources: list[SourceInfo]
     recommendations: list[str]
     session_id: str
     interaction_id: str | None = None
+    # "answer" = `answer` adalah jawaban atas pertanyaan.
+    # "choices" = `answer` adalah pertanyaan balik chatbot, dan `choices` berisi
+    # pilihan yang harus ditampilkan sebagai tombol.
+    mode: Literal["answer", "choices"] = "answer"
+    step: Literal["course", "week", "material", "question", "answer", "quiz"] = "answer"
+    choices: list[ChoiceInfo] = Field(default_factory=list)
+    context: ChatContext = Field(default_factory=ChatContext)
 
 
 class FeedbackRequest(BaseModel):
