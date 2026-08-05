@@ -26,6 +26,7 @@ class ModelSpec:
 
 
 _SPECS: list[ModelSpec] = [
+    ModelSpec("qwen3.7-flash", "Qwen 3.7 Flash", "openrouter", "qwen/qwen3.7-flash", True),
     ModelSpec("qwen3.7-plus", "Qwen 3.7 Plus", "openrouter", "qwen/qwen3.7-plus", True),
     ModelSpec("qwen3.6-flash", "Qwen 3.6 Flash", "openrouter", "qwen/qwen3.6-flash", True),
     ModelSpec("gpt-4o-mini", "GPT-4o mini", "openai", "gpt-4o-mini", True),

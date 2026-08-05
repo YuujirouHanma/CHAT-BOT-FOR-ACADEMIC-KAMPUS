@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     app_env: Literal["development", "production", "test"] = "development"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
+    # Muat model embedding & reranker saat startup, bukan saat permintaan pertama.
+    # Menambah waktu nyala server, tetapi menghilangkan lonjakan pada pertanyaan
+    # pertama mahasiswa — yang tanpa ini bisa menunggu beberapa menit karena
+    # model ±2 GB baru diunduh/dimuat saat itu juga.
+    warmup_models: bool = True
+
     # --- Inbound API auth (for other services calling this API, e.g. tim BE) ---
     ragacademic_api_key: SecretStr = SecretStr("")
 
@@ -40,7 +46,11 @@ class Settings(BaseSettings):
     generation_model: str = "Qwen/Qwen3.5-9B"
     generation_base_url: str | None = None
     generation_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
-    generation_max_tokens: int = Field(default=1024, ge=64, le=16384)
+    # Batas untuk jawaban utama. Dinaikkan dari 1024 karena model reasoning
+    # (mis. Qwen 3.7) menghabiskan token untuk penalaran sebelum menulis jawaban,
+    # dan token itu ikut dihitung ke batas ini — jawaban level "detail" berisiko
+    # terpotong di tengah. Batas atas, bukan target; sisanya tidak ditagih.
+    generation_max_tokens: int = Field(default=3072, ge=64, le=16384)
 
     # --- Embedding ---
     embed_model: str = "BAAI/bge-m3"

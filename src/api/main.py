@@ -13,14 +13,38 @@ from fastapi.middleware.cors import CORSMiddleware
 from src.api.auth import verify_api_key
 from src.api.routes import batch, browse, catalog, chat, models, upload
 from src.config import settings
+from src.ingestion.nltk_data import warn_if_missing
 from src.pipeline import RAGPipeline
 from src.utils.logger import logger
+
+
+def _check_auth_config() -> None:
+    """Cegah konfigurasi auth pengembangan ikut terbawa ke produksi.
+
+    `RAGACADEMIC_API_KEY` kosong mematikan autentikasi — memang disengaja untuk
+    pengembangan lokal, tetapi kalau terbawa ke produksi seluruh materi kuliah
+    dapat diakses siapa pun tanpa kredensial. Di produksi ini dijadikan galat
+    yang menggagalkan startup, bukan sekadar peringatan yang mudah terlewat.
+    """
+    if settings.ragacademic_api_key.get_secret_value():
+        return
+    if settings.app_env == "production":
+        raise RuntimeError(
+            "RAGACADEMIC_API_KEY kosong sementara APP_ENV=production — "
+            "API akan terbuka tanpa autentikasi. Isi key tersebut di .env."
+        )
+    logger.warning(
+        "AUTENTIKASI MATI (RAGACADEMIC_API_KEY kosong). Wajar untuk pengembangan "
+        "lokal; WAJIB diisi sebelum deployment."
+    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Starting RAGAcademic (env={}, llm={}/{})",
                 settings.app_env, settings.generation_provider, settings.generation_model)
+    warn_if_missing()  # NLTK data — missing data breaks pptx/docx parsing at runtime
+    _check_auth_config()
     pipeline = RAGPipeline()
     await pipeline.setup()
     app.state.pipeline = pipeline

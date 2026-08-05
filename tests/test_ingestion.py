@@ -249,6 +249,41 @@ class TestPartitionKwargs:
         assert _build_partition_kwargs(tmp_path / "REPORT.PDF") == {"strategy": "fast"}
 
 
+class TestNltkDataCheck:
+    """unstructured downloads NLTK data at runtime when missing and often gets
+    HTTP 403 in containers — breaking pptx/docx parsing. Startup must surface it."""
+
+    def test_reports_nothing_when_all_present(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import unstructured.nlp.tokenize as tok
+
+        from src.ingestion import nltk_data
+
+        monkeypatch.setattr(tok, "check_for_nltk_package", lambda **kw: True)
+        assert nltk_data.missing_packages() == []
+
+    def test_reports_each_missing_package(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import unstructured.nlp.tokenize as tok
+
+        from src.ingestion import nltk_data
+
+        monkeypatch.setattr(tok, "check_for_nltk_package", lambda **kw: False)
+        missing = nltk_data.missing_packages()
+
+        assert "tokenizers/punkt_tab" in missing
+        assert "taggers/averaged_perceptron_tagger_eng" in missing
+
+    def test_warn_never_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        import unstructured.nlp.tokenize as tok
+
+        from src.ingestion import nltk_data
+
+        def boom(**kw):
+            raise RuntimeError("lookup exploded")
+
+        monkeypatch.setattr(tok, "check_for_nltk_package", boom)
+        nltk_data.warn_if_missing()  # startup must not crash on a check failure
+
+
 class TestOcrFallback:
     """A scanned/image PDF parses without error but yields ~no text under `fast`.
     parse_document must retry with OCR, and degrade gracefully when OCR is

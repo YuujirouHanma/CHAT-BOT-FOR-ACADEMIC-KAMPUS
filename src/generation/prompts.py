@@ -97,10 +97,34 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "definisi/konsep, contoh/penerapan, perbandingan/perbedaan, sebab-akibat/alasan, "
     "langkah/proses, atau analisis/evaluasi. "
     "Pertanyaan harus singkat, natural, dan mendorong pemahaman lebih dalam. "
-    "Jawab HANYA dalam JSON valid berbentuk array string, tanpa markdown, tanpa penjelasan. "
+    "\n\nJIKA diberikan [RIWAYAT PERCAKAPAN]: pertanyaan lanjutan harus MELANJUTKAN alur "
+    "belajar itu — bangun di atas apa yang sudah dipahami mahasiswa, dan JANGAN mengulang "
+    "pertanyaan yang sudah pernah ia tanyakan atau yang jawabannya sudah dibahas. "
+    "Arahkan ke konsep berikutnya yang logis. "
+    "\n\nJawab HANYA dalam JSON valid berbentuk array string, tanpa markdown, tanpa penjelasan. "
     'Contoh (tipe berbeda): ["Apa yang dimaksud dengan ...?", '
     '"Bagaimana penerapan ... dalam kasus nyata?", "Apa perbedaan ... dan ...?"]'
 )
+
+
+def format_history(history: list[dict] | None, max_turns: int = 6) -> str:
+    """Ringkas riwayat percakapan untuk prompt follow-up.
+
+    Hanya `max_turns` pesan terakhir dipakai, dan jawaban asisten dipotong —
+    yang dibutuhkan cuma alur topiknya, bukan isi lengkapnya, dan prompt panjang
+    memakan max_tokens yang sudah ketat.
+    """
+    if not history:
+        return ""
+    lines = []
+    for turn in history[-max_turns:]:
+        role = "Mahasiswa" if turn.get("role") == "user" else "Tutor"
+        text = (turn.get("content") or "").strip().replace("\n", " ")
+        if role == "Tutor" and len(text) > 200:
+            text = text[:200] + "…"
+        if text:
+            lines.append(f"{role}: {text}")
+    return "\n".join(lines)
 
 
 # --- Quiz: multiple-choice questions generated from a material's content ---

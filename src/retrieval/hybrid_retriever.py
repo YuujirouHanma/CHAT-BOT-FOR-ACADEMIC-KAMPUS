@@ -50,12 +50,18 @@ class HybridRetriever:
         """Run the full retrieval pipeline.
 
         Args:
-            query: User question.
+            query: User question (boleh berupa query hasil pengayaan).
             retrieval_top_k: Initial vector-search candidates. Defaults to
                 settings.retrieval_top_k. More = better recall, slower rerank.
             rerank_top_k: Final results returned to caller. Defaults to
                 settings.rerank_top_k.
             source_filter: Optional source filename to restrict to one doc.
+
+        Catatan: query yang sama dipakai untuk pencarian vektor DAN reranking.
+        Sempat dicoba memisahkannya — reranking memakai pertanyaan asli mahasiswa
+        dengan dugaan query panjang mengencerkan sinyal — tetapi pengukuran
+        menunjukkan sebaliknya: skor rerank justru turun dari 0,009 ke 0,001.
+        Jangan diubah tanpa data pembanding kualitas urutan, bukan sekadar skor.
 
         Returns:
             List of dicts with keys: chunk_id, score (Qdrant), rerank_score,

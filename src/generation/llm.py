@@ -30,6 +30,7 @@ from src.generation.prompts import (
     FormattedContext,
     build_system_prompt,
     build_user_prompt,
+    format_history,
     parse_decompose_json,
     parse_followup_json,
     parse_quiz_json,
@@ -37,6 +38,55 @@ from src.generation.prompts import (
 from src.utils.logger import logger
 
 _RETRYABLE = (OAIConnError, OAITimeoutError, OAIServerError, OAIRateLimit)
+
+# Batas token untuk panggilan penunjang (decompose, follow-up, starter questions).
+# Keluarannya sendiri pendek — sebuah JSON kecil — tetapi model reasoning seperti
+# Qwen 3.7 menghabiskan token untuk penalaran SEBELUM menulis jawaban, dan token
+# itu ikut dihitung terhadap max_tokens. Bila jatahnya habis saat masih menalar,
+# model mengembalikan konten KOSONG dan fitur gagal diam-diam.
+#
+# Terukur pada Qwen 3.7 Flash: penalaran 650-1.400 token untuk tugas sekecil ini,
+# sementara isi JSON-nya hanya ±100-400 token. Batas 256 dan 1.024 sama-sama
+# terbukti tidak cukup — pada 1.024 sempat lolos mepet (penalaran 921, sisa 105)
+# lalu gagal begitu penalaran menembus 1.024. Prompt follow-up kini juga memuat
+# riwayat percakapan sehingga penalarannya lebih panjang lagi.
+# Nilai ini batas atas, bukan target: token yang tidak terpakai tidak ditagih.
+_AUX_MAX_TOKENS = 3072
+
+# Kuis butuh jauh lebih besar: keluarannya 5 soal × 4 opsi × penjelasan (±1.000
+# token) DITAMBAH token penalaran. Dengan batas lama 1800, penalaran menghabiskan
+# jatah sebelum JSON-nya sempat ditulis sehingga model mengembalikan konten kosong
+# dan pembuatan kuis selalu gagal pada model reasoning.
+_QUIZ_MAX_TOKENS = 4096
+
+
+def _usage_summary(response: Any) -> str:
+    """Ringkasan pemakaian token (dan biaya bila penyedia mengirimkannya).
+
+    Dicatat di setiap panggilan supaya pemakaian dan biaya dapat dipantau dari
+    log — sebelumnya tidak ada cara mengetahui berapa token yang terbakar selain
+    membuka dasbor penyedia. `cost` dan `reasoning_tokens` bersifat khusus
+    OpenRouter; penyedia lain cukup melaporkan jumlah tokennya saja.
+    """
+    u = getattr(response, "usage", None)
+    if u is None:
+        return "usage: n/a"
+    bagian = [
+        f"in={getattr(u, 'prompt_tokens', '?')}",
+        f"out={getattr(u, 'completion_tokens', '?')}",
+    ]
+    detail = getattr(u, "completion_tokens_details", None)
+    reasoning = getattr(detail, "reasoning_tokens", None) if detail else None
+    if not reasoning and isinstance(u, dict):  # sebagian SDK mengembalikan dict
+        reasoning = (u.get("completion_tokens_details") or {}).get("reasoning_tokens")
+    if reasoning:
+        bagian.append(f"reasoning={reasoning}")
+    cost = getattr(u, "cost", None)
+    if cost is None and isinstance(u, dict):
+        cost = u.get("cost")
+    if cost is not None:
+        bagian.append(f"cost=${float(cost):.6f}")
+    return "usage: " + " ".join(bagian)
 
 
 def _detect_image_mime(image_base64: str) -> str:
@@ -123,7 +173,7 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.1, max_tokens=256
+                messages, model=model, temperature=0.1, max_tokens=_AUX_MAX_TOKENS
             )
         except Exception as exc:
             logger.warning("Stage 1 decompose failed, falling back to raw question: {}", exc)
@@ -131,11 +181,23 @@ class LLMGenerator:
         return parse_decompose_json(raw, question)
 
     async def generate_followup(
-        self, question: str, dq: dict[str, Any], answer: str, model: str | None = None
+        self,
+        question: str,
+        dq: dict[str, Any],
+        answer: str,
+        model: str | None = None,
+        history: list[dict] | None = None,
     ) -> list[str]:
-        """Stage 5: generate follow-up questions as a separate call from the main answer."""
+        """Stage 5: generate follow-up questions as a separate call from the main answer.
+
+        `history` (percakapan sebelumnya di session yang sama) membuat pertanyaan
+        lanjutan menyambung alur belajar mahasiswa, bukan mengulang yang sudah
+        ditanyakan.
+        """
+        past = format_history(history)
         prompt = (
-            f"[PERTANYAAN AWAL]\n{question}\n\n"
+            (f"[RIWAYAT PERCAKAPAN]\n{past}\n\n" if past else "")
+            + f"[PERTANYAAN AWAL]\n{question}\n\n"
             f"[TOPIK]\n{dq.get('topik_utama', '-')}\n\n"
             f"[KONSEP KUNCI]\n{', '.join(dq.get('konsep_kunci', []))}\n\n"
             f"[JAWABAN FINAL]\n{answer}\n"
@@ -146,7 +208,7 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.5, max_tokens=256
+                messages, model=model, temperature=0.5, max_tokens=_AUX_MAX_TOKENS
             )
         except Exception as exc:
             logger.warning("Stage 5 follow-up generation failed: {}", exc)
@@ -170,7 +232,7 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.4, max_tokens=384
+                messages, model=model, temperature=0.4, max_tokens=_AUX_MAX_TOKENS
             )
         except Exception as exc:
             logger.warning("Starter question generation failed: {}", exc)
@@ -194,7 +256,7 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.3, max_tokens=1800
+                messages, model=model, temperature=0.3, max_tokens=_QUIZ_MAX_TOKENS
             )
         except Exception as exc:
             logger.warning("Quiz generation failed: {}", exc)
@@ -256,5 +318,8 @@ class LLMGenerator:
         if not content:
             raise GenerationError("LLM returned empty content")
 
-        logger.info("Generated {} chars via model={}", len(content), model_id)
+        logger.info(
+            "Generated {} chars via model={} | {}",
+            len(content), model_id, _usage_summary(response),
+        )
         return content
