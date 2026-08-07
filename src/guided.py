@@ -28,14 +28,15 @@ from typing import Literal
 # --- Langkah percakapan ---------------------------------------------------------
 # Literal (bukan str lepas) supaya nilainya ikut tervalidasi saat dipetakan ke
 # schema API — salah tulis langkah jadi error di type checker, bukan di runtime.
-StepName = Literal["course", "week", "material", "question", "answer", "quiz"]
-ChoiceKind = Literal["course", "week", "material", "question", "quiz"]
+StepName = Literal["course", "week", "material", "style", "question", "answer", "quiz"]
+ChoiceKind = Literal["course", "week", "material", "style", "question", "quiz"]
 
 STEP_COURSE: StepName = "course"       # menanyakan mata kuliah
 STEP_WEEK: StepName = "week"           # menanyakan minggu
 STEP_MATERIAL: StepName = "material"   # menanyakan materi
 STEP_QUESTION: StepName = "question"   # konteks lengkap, menawarkan pertanyaan template
 STEP_ANSWER: StepName = "answer"       # tidak menuntun; jawab pertanyaannya
+STEP_STYLE: StepName = "style"         # menanyakan gaya belajar
 STEP_QUIZ: StepName = "quiz"           # sedang mengerjakan kuis
 
 # "minggu 3", "minggu ke-3", "minggu ke 3", "week 3", "pertemuan 9", "tm9", "w3"
@@ -110,7 +111,7 @@ class Choice:
 class Refs:
     """Konteks yang berhasil dikenali dari satu pesan mahasiswa."""
     course_id: str | None = None
-    week: int | None = None
+    weeks: list[int] = field(default_factory=list)
     source_file: str | None = None
     content_id: str | None = None
     # Sisa teks setelah bagian yang dikenali dibuang — dipakai menilai apakah
@@ -120,7 +121,7 @@ class Refs:
 
     @property
     def any_found(self) -> bool:
-        return bool(self.course_id or self.week is not None or self.source_file)
+        return bool(self.course_id or self.weeks or self.source_file)
 
 
 # --- Normalisasi ---------------------------------------------------------------
@@ -143,6 +144,64 @@ def _content_tokens(text: str) -> list[str]:
 
 
 # --- Pengenalan ----------------------------------------------------------------
+# Rentang minggu: "minggu 3-5", "minggu 3 sampai 5", "minggu 3 s.d. 5"
+_WEEK_RANGE_RE = re.compile(
+    r"\b(?:minggu|week|pertemuan|tm|w)\s*(?:ke\s*-?\s*)?(\d{1,2})\s*"
+    r"(?:-|–|s\.?d\.?|sampai|hingga|ke)\s*(\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+# Semua penyebutan minggu dalam satu pesan: "minggu 3 dan minggu 4"
+_WEEK_ALL_RE = re.compile(
+    r"\b(?:minggu|week|pertemuan|tm|w)\s*(?:ke\s*-?\s*)?(\d{1,2})\b",
+    re.IGNORECASE,
+)
+
+# Deretan angka setelah kata minggu: "minggu 3 dan 4", "minggu 2,3,4"
+_WEEK_LIST_RE = re.compile(
+    r"\b(?:minggu|week|pertemuan|tm|w)\s*(?:ke\s*-?\s*)?"
+    r"(\d{1,2}(?:\s*(?:,|dan|&|\+)\s*\d{1,2})+)\b",
+    re.IGNORECASE,
+)
+
+_MAX_WEEK_SPAN = 16   # jaring pengaman agar salah baca tidak menyapu seluruh semester
+
+
+def find_weeks(text: str, *, allow_bare_number: bool = False) -> list[int]:
+    """Semua minggu yang disebut dalam satu pesan, terurut dan tanpa duplikat.
+
+    Mahasiswa yang menyiapkan ujian sering perlu beberapa minggu sekaligus, dan
+    menyebutnya dengan berbagai cara: "minggu 3 dan 4", "minggu 3-5",
+    "minggu 2, 3, 4". Ketiganya dikenali.
+
+    Rentang dibatasi `_MAX_WEEK_SPAN` supaya satu salah baca tidak diam-diam
+    memperluas pencarian ke seluruh semester. Rentang yang ditolak karena terlalu
+    lebar jatuh ke penyebutan minggu pertama ("minggu 1-40" → [1]), bukan kosong,
+    supaya maksud mahasiswa tidak hilang sama sekali.
+    """
+    hasil: set[int] = set()
+
+    for a, b in _WEEK_RANGE_RE.findall(text or ""):
+        awal, akhir = int(a), int(b)
+        if awal > akhir:
+            awal, akhir = akhir, awal
+        if akhir - awal < _MAX_WEEK_SPAN:
+            hasil.update(range(awal, akhir + 1))
+
+    for deret in _WEEK_LIST_RE.findall(text or ""):
+        hasil.update(int(n) for n in re.findall(r"\d{1,2}", deret))
+
+    if not hasil:
+        hasil.update(int(n) for n in _WEEK_ALL_RE.findall(text or ""))
+
+    if not hasil and allow_bare_number:
+        polos = (text or "").strip()
+        if re.fullmatch(r"\d{1,2}(?:\s*(?:,|dan|&|\+)\s*\d{1,2})*", polos):
+            hasil.update(int(n) for n in re.findall(r"\d{1,2}", polos))
+
+    return sorted(w for w in hasil if 1 <= w <= 52)
+
+
 def find_week(text: str, *, allow_bare_number: bool = False) -> int | None:
     """Nomor minggu dari teks, atau None.
 
@@ -481,7 +540,7 @@ def resolve_refs(
                 names.append(c["course_name"])
         refs.matched.extend(names)
 
-    refs.week = find_week(text, allow_bare_number=(awaiting == STEP_WEEK))
+    refs.weeks = find_weeks(text, allow_bare_number=(awaiting == STEP_WEEK))
 
     if materials:
         mat = match_material(text, materials, allow_ordinal=(awaiting == STEP_MATERIAL))
@@ -497,22 +556,43 @@ def resolve_refs(
 def next_step(
     *,
     course_id: str | None,
-    week: int | None,
+    weeks: list[int] | None,
     source_file: str | None,
+    style: str | None = None,
 ) -> StepName:
-    """Langkah berikutnya berdasarkan kelengkapan konteks."""
+    """Langkah berikutnya berdasarkan kelengkapan konteks.
+
+    Gaya belajar ditanyakan SETELAH materi dipilih: pada titik itu mahasiswa
+    sudah tahu apa yang akan dipelajari, sehingga pertanyaan "mau dijelaskan
+    dengan cara apa" menjadi masuk akal baginya.
+    """
     if not course_id:
         return STEP_COURSE
-    if week is None:
+    if not weeks:
         return STEP_WEEK
     if not source_file:
         return STEP_MATERIAL
+    if not style:
+        return STEP_STYLE
     return STEP_QUESTION
+
+
+def format_weeks(weeks: list[int]) -> str:
+    """Minggu terpilih dalam bentuk yang enak dibaca: "3", "3 dan 4", "3, 4, dan 5"."""
+    urut = sorted(set(weeks))
+    if not urut:
+        return ""
+    if len(urut) == 1:
+        return str(urut[0])
+    if len(urut) == 2:
+        return f"{urut[0]} dan {urut[1]}"
+    return ", ".join(str(w) for w in urut[:-1]) + f", dan {urut[-1]}"
 
 
 # --- Kalimat yang diucapkan chatbot --------------------------------------------
 def prompt_for(step: str, *, course_name: str | None = None,
-               week: int | None = None, source_file: str | None = None) -> str:
+               weeks: list[int] | None = None, source_file: str | None = None,
+               topic: str | None = None) -> str:
     """Kalimat tanya-balik untuk sebuah langkah.
 
     Nada sengaja ramah dan menyebut bahwa pilihan bisa diklik — pengguna sasaran
@@ -528,13 +608,23 @@ def prompt_for(step: str, *, course_name: str | None = None,
         nm = course_name or "mata kuliah ini"
         return (
             f"Baik, **{nm}**.\n\n**Minggu ke berapa?** Pilih salah satu di bawah, "
-            "atau tulis angkanya saja."
+            "atau tulis angkanya saja. Boleh lebih dari satu — misalnya "
+            "*minggu 3 dan 4* atau *minggu 2-4* kalau kamu sedang menyiapkan ujian."
         )
     if step == STEP_MATERIAL:
         nm = course_name or "mata kuliah ini"
+        label = format_weeks(weeks or [])
+        kepala = f"**{nm} — minggu {label}**" if label else f"**{nm}**"
+        bahasan = f"\n\nYang dibahas: {topic}" if topic else ""
         return (
-            f"**{nm} — minggu {week}** punya materi berikut.\n\n"
+            f"{kepala} punya materi berikut.{bahasan}\n\n"
             "**Pilih materi yang mau kamu pelajari:**"
+        )
+    if step == STEP_STYLE:
+        return (
+            f"Materi **{source_file}** siap kita bahas.\n\n"
+            "**Kamu ingin saya menjelaskannya dengan cara apa?** Pilih yang paling "
+            "cocok denganmu — bisa diganti kapan saja dengan mengetik *ganti gaya*."
         )
     if step == STEP_QUESTION:
         return (
@@ -546,7 +636,7 @@ def prompt_for(step: str, *, course_name: str | None = None,
 
 
 def empty_message(step: str, *, course_name: str | None = None,
-                  week: int | None = None) -> str:
+                  weeks: list[int] | None = None) -> str:
     """Pesan saat sebuah langkah tidak punya isi sama sekali."""
     if step == STEP_COURSE:
         return (
@@ -559,6 +649,6 @@ def empty_message(step: str, *, course_name: str | None = None,
             "Coba pilih mata kuliah lain."
         )
     return (
-        f"Belum ada materi untuk **{course_name}** minggu {week}. "
+        f"Belum ada materi untuk **{course_name}** minggu {format_weeks(weeks or [])}. "
         "Coba minggu yang lain."
     )

@@ -238,7 +238,8 @@ class TestQuery:
         await pipeline.query("q", source_filter="specific.pdf")
 
         retrieve_mock.assert_awaited_once_with(
-            query="q", content_id=None, source_filter="specific.pdf"
+            query="q", content_id=None, source_filter="specific.pdf",
+            course_id=None, weeks=None,
         )
 
     @pytest.mark.asyncio

@@ -13,7 +13,10 @@ class QueryRequest(BaseModel):
     content_id: str | None = None
     source_filter: str | None = Field(default=None, max_length=255)
     model: str | None = Field(default=None, max_length=64)  # registry key; None = default
-    level: Literal["sederhana", "standar", "detail"] | None = None  # gaya jawaban
+    level: Literal["sederhana", "standar", "detail"] | None = None  # kedalaman jawaban
+    # Gaya belajar: mengganti system prompt (CARA menjawab) dan alat yang
+    # dipakai LLM. Lihat GET /learning-styles. Berbeda dari `level`.
+    style: str | None = Field(default=None, max_length=32)
     # Guided navigation: chatbot menuntun mahasiswa memilih mata kuliah → minggu →
     # materi lewat pilihan yang bisa diklik. Matikan (False) kalau klien ingin
     # perilaku tanya-jawab murni tanpa tanya-balik.
@@ -22,6 +25,12 @@ class QueryRequest(BaseModel):
     # label tombol sebagai `question` biasa juga sudah dikenali.
     course_id: str | None = Field(default=None, max_length=128)
     week: int | None = Field(default=None, ge=1, le=52)
+    # Identitas mahasiswa dari aplikasi pemanggil. Dipakai menyaring daftar
+    # riwayat percakapan miliknya sendiri.
+    student_id: str | None = Field(default=None, max_length=128)
+    # Beberapa minggu sekaligus, mis. saat mahasiswa menyiapkan ujian. Bila diisi,
+    # nilainya menang atas `week`. `week` dipertahankan agar klien lama tetap jalan.
+    weeks: list[int] | None = Field(default=None, max_length=52)
 
 
 class SourceInfo(BaseModel):
@@ -33,20 +42,38 @@ class SourceInfo(BaseModel):
     rerank_score: float | None = None
 
 
+class Attachment(BaseModel):
+    """Berkas turunan dari sebuah jawaban, mis. notebook dari gaya belajar praktik.
+
+    Dibentuk deterministik dari isi jawaban — tanpa panggilan LLM tambahan —
+    sehingga isinya dijamin sama dengan yang dibaca mahasiswa di layar.
+    """
+    kind: Literal["notebook"]
+    filename: str
+    content: str          # isi berkas apa adanya (JSON .ipynb)
+    mime: str = "application/x-ipynb+json"
+
+
 class ChoiceInfo(BaseModel):
     """Satu pilihan yang bisa diklik mahasiswa di chat."""
     label: str
     value: str
-    kind: Literal["course", "week", "material", "question", "quiz"]
+    kind: Literal["course", "week", "material", "style", "question", "quiz"]
 
 
 class ChatContext(BaseModel):
     """Konteks yang sedang aktif — dipakai klien menampilkan breadcrumb."""
     course_id: str | None = None
     course_name: str | None = None
+    weeks: list[int] = Field(default_factory=list)
+    # Minggu pertama dari `weeks`, dipertahankan agar klien yang sudah membaca
+    # `week` (satu nilai) tidak rusak saat mahasiswa memilih beberapa minggu.
     week: int | None = None
     content_id: str | None = None
     source_file: str | None = None
+    style: str | None = None
+    # Topik yang dibahas pada minggu terpilih, disimpulkan dari materi terindex.
+    topic: str | None = None
 
 
 class QueryResponse(BaseModel):
@@ -59,8 +86,11 @@ class QueryResponse(BaseModel):
     # "choices" = `answer` adalah pertanyaan balik chatbot, dan `choices` berisi
     # pilihan yang harus ditampilkan sebagai tombol.
     mode: Literal["answer", "choices"] = "answer"
-    step: Literal["course", "week", "material", "question", "answer", "quiz"] = "answer"
+    step: Literal[
+        "course", "week", "material", "style", "question", "answer", "quiz",
+    ] = "answer"
     choices: list[ChoiceInfo] = Field(default_factory=list)
+    attachments: list[Attachment] = Field(default_factory=list)
     context: ChatContext = Field(default_factory=ChatContext)
 
 
@@ -206,6 +236,51 @@ class ModelInfo(BaseModel):
 class ModelListResponse(BaseModel):
     default: str
     models: list[ModelInfo]
+
+
+# --- Riwayat percakapan ---
+class TranscriptMessage(BaseModel):
+    """Satu pesan seperti yang tampil di layar, termasuk langkah navigasi."""
+    role: Literal["user", "assistant"]
+    content: str
+    at: str | None = None
+    mode: Literal["answer", "choices"] | None = None
+    step: str | None = None
+    choices: list[ChoiceInfo] = Field(default_factory=list)
+    sources: list[SourceInfo] = Field(default_factory=list)
+    interaction_id: str | None = None
+
+
+class ConversationSummary(BaseModel):
+    conversation_id: str
+    title: str
+    student_id: str | None = None
+    created_at: str | None = None
+    updated_at: str | None = None
+    message_count: int = 0
+    context: ChatContext = Field(default_factory=ChatContext)
+
+
+class ConversationListResponse(BaseModel):
+    total: int
+    conversations: list[ConversationSummary]
+
+
+class ConversationDetail(ConversationSummary):
+    transcript: list[TranscriptMessage] = Field(default_factory=list)
+
+
+# --- Gaya belajar ---
+class LearningStyleInfo(BaseModel):
+    key: str
+    label: str
+    description: str
+    produces_notebook: bool = False
+
+
+class LearningStyleListResponse(BaseModel):
+    default: str
+    styles: list[LearningStyleInfo]
 
 
 # --- Error ---

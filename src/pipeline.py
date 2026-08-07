@@ -9,7 +9,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from src import gen_cache, guided
+from src import gen_cache, guided, learning_styles
 from src.catalog import humanize_course, resolve_course_week
 from src.config import settings
 from src.generation.llm import LLMGenerator
@@ -58,9 +58,11 @@ class GuidedTurn:
     answer_question: bool = False
     course_id: str | None = None
     course_name: str | None = None
-    week: int | None = None
+    weeks: list[int] = field(default_factory=list)
     content_id: str | None = None
     source_file: str | None = None
+    style: str | None = None
+    topic: str | None = None
 
 
 def _course_name(courses: list[dict], course_id: str) -> str:
@@ -177,6 +179,9 @@ class RAGPipeline:
         model: str | None = None,
         level: str | None = None,
         history: list[dict] | None = None,
+        course_id: str | None = None,
+        weeks: list[int] | None = None,
+        style: str | None = None,
     ) -> QueryResult:
         logger.info("=== Query: '{}' (content_id={}, model={}, level={}) ===",
                     question[:80], content_id, model or "default", level or "standar")
@@ -189,6 +194,7 @@ class RAGPipeline:
         # Stage 2: retrieve using the enriched query.
         results = await self._retriever.retrieve(
             query=enriched_query, content_id=content_id, source_filter=source_filter,
+            course_id=course_id, weeks=weeks,
         )
         if not results:
             result = QueryResult(
@@ -205,7 +211,9 @@ class RAGPipeline:
             return result
 
         context = format_retrieval_results(results)
-        answer = await self._generator.generate(question, context, model=model, level=level)
+        answer = await self._generator.generate(
+            question, context, model=model, level=level, style=style,
+        )
 
         sources = [
             {
@@ -240,9 +248,10 @@ class RAGPipeline:
         *,
         course_id: str | None = None,
         course_name: str | None = None,
-        week: int | None = None,
+        weeks: list[int] | None = None,
         content_id: str | None = None,
         source_file: str | None = None,
+        style: str | None = None,
         awaiting: str | None = None,
         model: str | None = None,
     ) -> GuidedTurn:
@@ -261,15 +270,19 @@ class RAGPipeline:
             return await self._ask_course(courses)
 
         cur_course, cur_name = course_id, course_name
-        cur_week, cur_cid, cur_sf = week, content_id, source_file
+        cur_weeks = sorted(set(weeks or []))
+        cur_cid, cur_sf = content_id, source_file
+        # Gaya belajar boleh diganti kapan saja lewat teks bebas ("ganti gaya",
+        # "pakai diagram") — bukan hanya pada langkah pemilihannya.
+        cur_style = learning_styles.match(question) or style
 
         # Fase 0: kalau pesan ini menyebut salah satu materi yang sedang
         # ditawarkan, kenali dulu dan buang namanya dari teks. Tanpa ini nama
         # file seperti "Materi SBD TM9.pptx" terbaca sebagai minggu 9.
         text_for_ctx = question
         picked: dict | None = None
-        if cur_course and cur_week is not None:
-            offered = await self._store.list_materials(cur_course, cur_week)
+        if cur_course and cur_weeks:
+            offered = await self._store.list_materials_for_weeks(cur_course, cur_weeks)
             picked = guided.match_material(
                 question, offered,
                 allow_ordinal=(awaiting == guided.STEP_MATERIAL),
@@ -286,10 +299,11 @@ class RAGPipeline:
         if refs.course_id and refs.course_id != cur_course:
             cur_course = refs.course_id
             cur_name = None
-            cur_week = cur_cid = cur_sf = None
+            cur_weeks = []
+            cur_cid = cur_sf = None
             picked = None          # daftar materi tadi sudah tidak berlaku
-        if refs.week is not None and refs.week != cur_week:
-            cur_week = refs.week
+        if refs.weeks and refs.weeks != cur_weeks:
+            cur_weeks = refs.weeks
             cur_cid = cur_sf = None
             picked = None
         # Nama tampilan bisa belum terisi walau course_id sudah ada — misalnya
@@ -299,8 +313,8 @@ class RAGPipeline:
 
         # Fase 2: tetapkan materi.
         materials: list[dict] = []
-        if cur_course and cur_week is not None:
-            materials = await self._store.list_materials(cur_course, cur_week)
+        if cur_course and cur_weeks:
+            materials = await self._store.list_materials_for_weeks(cur_course, cur_weeks)
             mat = picked or guided.match_material(
                 question, materials,
                 allow_ordinal=(awaiting == guided.STEP_MATERIAL),
@@ -317,8 +331,8 @@ class RAGPipeline:
                         break
 
         ctx = {
-            "course_id": cur_course, "course_name": cur_name, "week": cur_week,
-            "content_id": cur_cid, "source_file": cur_sf,
+            "course_id": cur_course, "course_name": cur_name, "weeks": cur_weeks,
+            "content_id": cur_cid, "source_file": cur_sf, "style": cur_style,
         }
 
         # Pertanyaan sungguhan selalu dijawab — mahasiswa tetap bisa memakai ini
@@ -327,19 +341,20 @@ class RAGPipeline:
             return GuidedTurn(step=guided.STEP_ANSWER, answer_question=True, **ctx)
 
         step = guided.next_step(
-            course_id=cur_course, week=cur_week, source_file=cur_sf,
+            course_id=cur_course, weeks=cur_weeks, source_file=cur_sf,
+            style=cur_style,
         )
         logger.info(
-            "Guided | step={} course={} week={} materi={}",
-            step, cur_course, cur_week, cur_sf,
+            "Guided | step={} course={} minggu={} materi={}",
+            step, cur_course, cur_weeks, cur_sf,
         )
 
         if step == guided.STEP_COURSE:
             return await self._ask_course(courses)
 
         if step == guided.STEP_WEEK:
-            weeks = await self._store.list_weeks(cur_course or "")
-            if not weeks:
+            tersedia = await self._store.list_weeks(cur_course or "")
+            if not tersedia:
                 turn = await self._ask_course(courses)
                 turn.message = guided.empty_message(
                     guided.STEP_WEEK, course_name=cur_name,
@@ -350,49 +365,98 @@ class RAGPipeline:
                 message=guided.prompt_for(step, course_name=cur_name),
                 choices=[
                     guided.Choice(label=f"Minggu {w}", value=str(w), kind="week")
-                    for w in weeks
+                    for w in tersedia
                 ],
                 **ctx,
             )
 
         if step == guided.STEP_MATERIAL:
             if not materials:
-                weeks = await self._store.list_weeks(cur_course or "")
+                tersedia = await self._store.list_weeks(cur_course or "")
                 return GuidedTurn(
                     step=guided.STEP_WEEK,
                     message=guided.empty_message(
-                        guided.STEP_MATERIAL, course_name=cur_name, week=cur_week,
+                        guided.STEP_MATERIAL, course_name=cur_name, weeks=cur_weeks,
                     ),
                     choices=[
                         guided.Choice(label=f"Minggu {w}", value=str(w), kind="week")
-                        for w in weeks
+                        for w in tersedia
                     ],
-                    **{**ctx, "week": None},
+                    **{**ctx, "weeks": []},
                 )
+            topik = await self.week_topic(cur_course or "", cur_weeks, model=model)
             return GuidedTurn(
                 step=step,
-                message=guided.prompt_for(step, course_name=cur_name, week=cur_week),
+                message=guided.prompt_for(
+                    step, course_name=cur_name, weeks=cur_weeks, topic=topik,
+                ),
+                topic=topik or None,
                 choices=[
                     guided.Choice(
-                        label=m["source_file"], value=m["source_file"], kind="material",
+                        # Saat lebih dari satu minggu dipilih, nama berkas saja
+                        # ambigu — minggunya ikut ditampilkan.
+                        label=(f"Minggu {m['week']} — {m['source_file']}"
+                               if len(cur_weeks) > 1 and m.get("week") is not None
+                               else m["source_file"]),
+                        value=m["source_file"], kind="material",
                     )
                     for m in materials
                 ],
                 **ctx,
             )
 
+        if step == guided.STEP_STYLE:
+            return GuidedTurn(
+                step=step,
+                message=guided.prompt_for(step, source_file=cur_sf),
+                choices=[
+                    guided.Choice(
+                        label=f"{s.label} — {s.description}", value=s.key, kind="style",
+                    )
+                    for s in learning_styles.all_styles()
+                ],
+                **ctx,
+            )
+
         # STEP_QUESTION — konteks lengkap, tawarkan pertanyaan template materi ini.
+        spec = learning_styles.resolve(cur_style)
         starters: list[str] = []
         if cur_cid and cur_sf:
-            starters = await self.starter_questions(cur_cid, cur_sf, model=model)
+            starters = await self.starter_questions(
+                cur_cid, cur_sf, model=model, style=cur_style,
+            )
         return GuidedTurn(
             step=guided.STEP_QUESTION,
-            message=guided.prompt_for(guided.STEP_QUESTION, source_file=cur_sf),
+            message=spec.greeting + "\n\n" + guided.prompt_for(
+                guided.STEP_QUESTION, source_file=cur_sf,
+            ),
             choices=[
                 guided.Choice(label=q, value=q, kind="question") for q in starters
             ],
             **ctx,
         )
+
+    async def week_topic(
+        self, course_id: str, weeks: list[int], model: str | None = None,
+    ) -> str:
+        """Satu kalimat topik yang dibahas pada minggu-minggu tertentu.
+
+        Disimpulkan dari isi materi yang terindex, bukan dari nama berkas — nama
+        seperti "Materi SBD TM9.pptx" tidak memberi tahu mahasiswa apa pun.
+        Di-cache karena isinya hanya berubah bila materi minggu itu berubah.
+        """
+        if not (course_id and weeks):
+            return ""
+        kunci = f"{course_id}::{'-'.join(str(w) for w in sorted(set(weeks)))}"
+        cached = gen_cache.load("week_topic", kunci, "topic")
+        if cached is not None:
+            return cached[0] if isinstance(cached, list) and cached else ""
+
+        text = await self._store.get_week_text(course_id, weeks)
+        topik = await self._generator.summarize_week_topic(text, model=model)
+        if topik:
+            gen_cache.save("week_topic", kunci, "topic", [topik])
+        return topik
 
     async def _ask_course(self, courses: list[dict]) -> GuidedTurn:
         """Langkah pertama: tawarkan daftar mata kuliah (atau beri tahu kalau kosong)."""
@@ -416,16 +480,26 @@ class RAGPipeline:
 
     async def starter_questions(
         self, content_id: str, source_file: str, model: str | None = None,
+        style: str | None = None,
     ) -> list[str]:
-        """Template opener questions for a material. Cached after first generation."""
-        cached = gen_cache.load("starter", content_id, source_file)
+        """Pertanyaan pembuka untuk sebuah materi, disesuaikan gaya belajar.
+
+        Cache dipisah per gaya: pertanyaan untuk gaya "visual" (soal alur dan
+        hubungan) tidak cocok dipakai ulang untuk gaya "praktik" (soal cara dan
+        penerapan), jadi keduanya tidak boleh berbagi kunci cache.
+        """
+        spec = learning_styles.resolve(style)
+        kunci = f"{source_file}::{spec.key}"
+        cached = gen_cache.load("starter", content_id, kunci)
         if cached is not None:
             return cached
 
         text = await self._store.get_material_text(content_id, source_file)
-        questions = await self._generator.generate_starter_questions(text, model=model)
+        questions = await self._generator.generate_starter_questions(
+            text, model=model, style_hint=spec.starter_hint,
+        )
         if questions:
-            gen_cache.save("starter", content_id, source_file, questions)
+            gen_cache.save("starter", content_id, kunci, questions)
         return questions
 
     async def quiz(

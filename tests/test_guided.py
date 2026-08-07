@@ -86,6 +86,61 @@ class TestFindWeek:
         assert guided.find_week("3", allow_bare_number=True) == 3
 
 
+class TestFindWeeks:
+    """Mahasiswa yang menyiapkan ujian sering butuh beberapa minggu sekaligus."""
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("minggu 3", [3]),
+            ("minggu 3 dan 4", [3, 4]),
+            ("minggu 3 & 4", [3, 4]),
+            ("minggu 2, 3, 4", [2, 3, 4]),
+            ("minggu 3-5", [3, 4, 5]),
+            ("minggu 3 sampai 5", [3, 4, 5]),
+            ("minggu 3 s.d 5", [3, 4, 5]),
+            ("saya mau sbd minggu 3 dan minggu 7", [3, 7]),
+            ("apa itu normalisasi", []),
+        ],
+    )
+    def test_patterns(self, text: str, expected: list[int]) -> None:
+        assert guided.find_weeks(text) == expected
+
+    def test_reversed_range_is_normalised(self) -> None:
+        assert guided.find_weeks("minggu 5-3") == [3, 4, 5]
+
+    def test_absurdly_wide_range_falls_back_to_first_week(self) -> None:
+        """Satu salah baca tidak boleh menyapu seluruh semester."""
+        assert guided.find_weeks("minggu 1-40") == [1]
+
+    def test_bare_numbers_only_when_asking_week(self) -> None:
+        assert guided.find_weeks("3 dan 4") == []
+        assert guided.find_weeks("3 dan 4", allow_bare_number=True) == [3, 4]
+
+    def test_duplicates_removed_and_sorted(self) -> None:
+        assert guided.find_weeks("minggu 4 dan minggu 3 dan minggu 4") == [3, 4]
+
+    @pytest.mark.parametrize(
+        ("weeks", "expected"),
+        [([], ""), ([3], "3"), ([3, 4], "3 dan 4"), ([2, 3, 4], "2, 3, dan 4")],
+    )
+    def test_format_weeks(self, weeks: list[int], expected: str) -> None:
+        assert guided.format_weeks(weeks) == expected
+
+    def test_resolve_refs_carries_multiple_weeks(self) -> None:
+        refs = guided.resolve_refs("saya mau sbd minggu 3 dan 4", COURSES)
+        assert refs.course_id == "sbd"
+        assert refs.weeks == [3, 4]
+
+    def test_next_step_needs_at_least_one_week(self) -> None:
+        assert guided.next_step(
+            course_id="sbd", weeks=[], source_file=None,
+        ) == guided.STEP_WEEK
+        assert guided.next_step(
+            course_id="sbd", weeks=[3, 4], source_file=None,
+        ) == guided.STEP_MATERIAL
+
+
 class TestLooksLikeQuestion:
     @pytest.mark.parametrize(
         "text",
@@ -294,35 +349,44 @@ class TestQuizHelpers:
 
 class TestNextStep:
     @pytest.mark.parametrize(
-        ("course", "week", "source", "expected"),
+        ("course", "weeks", "source", "expected"),
         [
-            (None, None, None, guided.STEP_COURSE),
-            ("sbd", None, None, guided.STEP_WEEK),
-            ("sbd", 3, None, guided.STEP_MATERIAL),
-            ("sbd", 3, "bab3.pdf", guided.STEP_QUESTION),
+            (None, [], None, guided.STEP_COURSE),
+            ("sbd", [], None, guided.STEP_WEEK),
+            ("sbd", [3], None, guided.STEP_MATERIAL),
+            ("sbd", [3], "bab3.pdf", guided.STEP_STYLE),
         ],
     )
     def test_progression(
-        self, course: str | None, week: int | None,
+        self, course: str | None, weeks: list[int],
         source: str | None, expected: str,
     ) -> None:
         assert guided.next_step(
-            course_id=course, week=week, source_file=source,
+            course_id=course, weeks=weeks, source_file=source,
         ) == expected
+
+    def test_style_completes_the_flow(self) -> None:
+        """Gaya belajar ditanyakan setelah materi, sebelum menawarkan pertanyaan."""
+        assert guided.next_step(
+            course_id="sbd", weeks=[3], source_file="bab3.pdf", style=None,
+        ) == guided.STEP_STYLE
+        assert guided.next_step(
+            course_id="sbd", weeks=[3], source_file="bab3.pdf", style="visual",
+        ) == guided.STEP_QUESTION
 
 
 class TestResolveRefs:
     def test_course_and_week_in_one_message(self) -> None:
         refs = guided.resolve_refs("saya mau mata kuliah sbd, minggu 3", COURSES)
         assert refs.course_id == "sbd"
-        assert refs.week == 3
+        assert refs.weeks == [3]
         assert refs.any_found is True
 
     def test_question_can_carry_context(self) -> None:
         """"apa itu normalisasi di sbd minggu 3?" = pertanyaan DAN filter."""
         text = "apa itu normalisasi di sbd minggu 3?"
         refs = guided.resolve_refs(text, COURSES)
-        assert (refs.course_id, refs.week) == ("sbd", 3)
+        assert (refs.course_id, refs.weeks) == ("sbd", [3])
         assert guided.looks_like_question(text) is True
 
     def test_nothing_found(self) -> None:
@@ -331,7 +395,7 @@ class TestResolveRefs:
 
     def test_awaiting_week_allows_bare_number(self) -> None:
         refs = guided.resolve_refs("3", COURSES, awaiting=guided.STEP_WEEK)
-        assert refs.week == 3
+        assert refs.weeks == [3]
 
     def test_material_matched_when_list_given(self) -> None:
         refs = guided.resolve_refs(
@@ -349,7 +413,7 @@ class TestPrompts:
     )
     def test_every_step_has_a_prompt(self, step: str) -> None:
         text = guided.prompt_for(
-            step, course_name="Sistem Basis Data", week=3, source_file="bab3.pdf",
+            step, course_name="Sistem Basis Data", weeks=[3], source_file="bab3.pdf",
         )
         assert text.strip()
 
@@ -358,7 +422,7 @@ class TestPrompts:
 
     def test_empty_messages_mention_the_context(self) -> None:
         msg = guided.empty_message(
-            guided.STEP_MATERIAL, course_name="Sistem Basis Data", week=3,
+            guided.STEP_MATERIAL, course_name="Sistem Basis Data", weeks=[3],
         )
         assert "Sistem Basis Data" in msg
         assert "3" in msg

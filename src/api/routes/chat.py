@@ -17,9 +17,10 @@ from collections.abc import Sequence
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from src import guided
+from src import guided, learning_styles
 from src.api.dependencies import get_pipeline
 from src.api.schemas import (
+    Attachment,
     ChatContext,
     ChoiceInfo,
     FeedbackRequest,
@@ -28,6 +29,7 @@ from src.api.schemas import (
     SourceInfo,
 )
 from src.api.session import Session, session_store
+from src.generation.notebook import build_notebook, safe_filename
 from src.hitl.logger import log_feedback
 from src.pipeline import RAGPipeline
 from src.utils.logger import logger
@@ -39,9 +41,12 @@ def _context_of(session: Session) -> ChatContext:
     return ChatContext(
         course_id=session.course_id,
         course_name=session.course_name,
-        week=session.week,
+        weeks=list(session.weeks),
+        week=session.weeks[0] if session.weeks else None,
         content_id=session.content_id,
         source_file=session.source_filter,
+        style=session.style,
+        topic=session.topic,
     )
 
 
@@ -56,6 +61,14 @@ def _choices_reply(
     Pertanyaan template ikut disalin ke `recommendations` agar klien lama yang
     hanya membaca field itu tetap mendapat isinya.
     """
+    info = [ChoiceInfo(label=c.label, value=c.value, kind=c.kind) for c in choices]
+    # Langkah navigasi TIDAK masuk `history` (konteks LLM) tetapi TETAP masuk
+    # transkrip, supaya percakapan dapat ditampilkan ulang persis seperti aslinya.
+    session.record(
+        "assistant", message, mode="choices", step=step,
+        choices=[c.model_dump() for c in info],
+    )
+    session.persist()
     return QueryResponse(
         answer=message,
         sources=[],
@@ -63,9 +76,7 @@ def _choices_reply(
         session_id=session.session_id,
         mode="choices",
         step=step,  # type: ignore[arg-type]
-        choices=[
-            ChoiceInfo(label=c.label, value=c.value, kind=c.kind) for c in choices
-        ],
+        choices=info,
         context=_context_of(session),
     )
 
@@ -172,17 +183,21 @@ async def ask_question(
     body: QueryRequest,
     pipeline: RAGPipeline = Depends(get_pipeline),
 ) -> QueryResponse:
-    session = session_store.get_or_create(body.session_id)
+    session = session_store.get_or_create(body.session_id, body.student_id)
+    session.record("user", body.question)
 
     # Konteks yang dikirim eksplisit oleh klien menang atas hasil resolusi teks.
     if any(v is not None for v in
-           (body.content_id, body.source_filter, body.course_id, body.week)):
+           (body.content_id, body.source_filter, body.course_id, body.week, body.weeks)):
         session.set_guided(
             course_id=body.course_id,
-            week=body.week,
+            weeks=body.weeks or ([body.week] if body.week else None),
             content_id=body.content_id,
             source_filter=body.source_filter,
         )
+
+    if body.style and learning_styles.get(body.style):
+        session.style = body.style
 
     if body.guided:
         # Kuis mendahului navigasi: selama kuis berjalan, pesan mahasiswa adalah
@@ -195,18 +210,22 @@ async def ask_question(
             body.question,
             course_id=session.course_id,
             course_name=session.course_name,
-            week=session.week,
+            weeks=list(session.weeks),
             content_id=session.content_id,
             source_file=session.source_filter,
+            style=session.style,
             awaiting=session.awaiting,
             model=body.model,
         )
         # Hasil resolusi guided adalah sumber kebenaran konteks — dipakai apa
         # adanya, termasuk saat mengosongkan (mis. mahasiswa minta ganti materi).
+        if turn.topic:
+            session.topic = turn.topic
+        session.style = turn.style
         session.apply_guided(
             course_id=turn.course_id,
             course_name=turn.course_name,
-            week=turn.week,
+            weeks=turn.weeks,
             content_id=turn.content_id,
             source_filter=turn.source_file,
         )
@@ -232,8 +251,8 @@ async def ask_question(
         session.awaiting = None
 
     logger.info(
-        "Chat | session={} course={} week={} content_id={} source={}",
-        session.session_id[:8], session.course_id, session.week,
+        "Chat | session={} course={} minggu={} content_id={} source={}",
+        session.session_id[:8], session.course_id, session.weeks,
         session.content_id, session.source_filter,
     )
 
@@ -248,6 +267,11 @@ async def ask_question(
             # Riwayat SEBELUM pertanyaan ini, supaya pertanyaan lanjutan
             # menyambung alur dan tidak mengulang yang sudah dibahas.
             history=list(session.history),
+            # Bila mahasiswa sudah memilih minggu tetapi belum satu materi,
+            # pencarian tetap dibatasi ke minggu-minggu itu — bukan seluruh korpus.
+            course_id=session.course_id if not session.content_id else None,
+            weeks=list(session.weeks) if not session.content_id else None,
+            style=session.style,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
@@ -258,6 +282,27 @@ async def ask_question(
 
     session.add_turn("user", body.question)
     session.add_turn("assistant", result.answer)
+    session.record(
+        "assistant", result.answer, mode="answer", step="answer",
+        sources=result.sources, interaction_id=result.interaction_id,
+    )
+    session.persist()
+
+    # Gaya belajar "praktik" meminta LLM menulis kode; kode itu diubah menjadi
+    # notebook secara deterministik dari jawaban yang sama, tanpa panggilan LLM
+    # tambahan, sehingga isinya persis seperti yang dibaca mahasiswa.
+    attachments: list[Attachment] = []
+    spec = learning_styles.resolve(session.style)
+    if spec.produces_notebook:
+        isi = build_notebook(result.answer, title=body.question[:80])
+        if isi:
+            attachments.append(
+                Attachment(
+                    kind="notebook",
+                    filename=safe_filename(session.source_filter or body.question[:40]),
+                    content=isi,
+                )
+            )
 
     return QueryResponse(
         answer=result.answer,
@@ -267,6 +312,7 @@ async def ask_question(
         interaction_id=result.interaction_id,
         mode="answer",
         step="answer",
+        attachments=attachments,
         context=_context_of(session),
     )
 

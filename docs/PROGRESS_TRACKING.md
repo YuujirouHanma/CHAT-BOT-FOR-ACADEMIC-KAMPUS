@@ -1,8 +1,8 @@
 # Progress Tracking — RAGAcademic
 
 **Judul proyek:** RAGAcademic — Chatbot Multimodal berbasis RAG untuk Materi Kuliah
-**Periode:** 18 Mei 2026 – 5 Agustus 2026 (79 hari / ±11,5 minggu)
-**Status:** 92% — sistem berjalan utuh dari unggah materi sampai jawaban bersitasi,
+**Periode:** 18 Mei 2026 – 6 Agustus 2026 (80 hari / ±11,5 minggu)
+**Status:** 97% — sistem berjalan utuh dari unggah materi sampai jawaban bersitasi,
 termasuk alur belajar terpandu beserta kuis di dalam percakapan.
 
 ---
@@ -18,6 +18,7 @@ termasuk alur belajar terpandu beserta kuis di dalam percakapan.
 | V. Ketahanan & fitur akademik | 6 – 19 Juli | Multi-format, OCR, katalog terpandu, kuis & penilaian | 72% |
 | VI. Multimodal, alur percakapan & dokumentasi | 20 – 30 Juli | Transkripsi audio/video, guided chat, diagram arsitektur | 85% |
 | VII. Pengujian mandiri & penuntasan masalah | 31 Juli – 5 Agustus | Kuis di dalam percakapan, perbaikan masalah terbuka, kontrak API | 92% |
+| VIII. Personalisasi pembelajaran | 6 Agustus | Multi-minggu, topik otomatis, gaya belajar beserta tool-nya | 97% |
 
 ---
 
@@ -152,6 +153,10 @@ termasuk alur belajar terpandu beserta kuis di dalam percakapan.
 | Rab, 5 Agustus | Penuntasan masalah terbuka: model dimuat saat *startup* (bukan saat permintaan pertama), *reranking* dinilai terhadap pertanyaan asli, batas token disesuaikan untuk model *reasoning*, penjagaan konfigurasi autentikasi produksi, pencatatan pemakaian token dan biaya | `src/config.py`, `src/pipeline.py`, `src/retrieval/hybrid_retriever.py`, `src/generation/llm.py`, `src/api/main.py`. Pemanasan model 10–17 detik saat nyala; log kini memuat `usage: in/out/reasoning/cost` | **(100%)** 90% |
 | Rab, 5 Agustus | Integrasi **kuis ke dalam alur percakapan** — soal disajikan satu per satu di chat, jawaban dinilai beserta pembahasan, dapat dihentikan di tengah jalan | `src/guided.py`, `src/api/routes/chat.py`, `src/api/session.py`; `TestQuizInChat` dan `TestQuizHelpers` — total **316 uji lolos** (sebelumnya 284) | **(100%)** 92% |
 | Rab, 5 Agustus | Pembaruan kontrak API dan penyusunan catatan perubahan untuk tim Back-End | `docs/CHANGELOG_TIM_BE.md` (baru), `docs/api/openapi.json` diperbarui (14 endpoint) | **(100%)** 92% |
+| Kam, 6 Agustus | Pemilihan **beberapa minggu sekaligus** (mis. "minggu 3 dan 4", "minggu 2-4") untuk mahasiswa yang menyiapkan ujian; filter penyimpanan diperluas agar pencarian benar-benar tercakup ke minggu-minggu terpilih | `src/storage/qdrant_store.py` (filter `MatchAny`), `src/guided.py` (`find_weeks`), `src/api/session.py`; label materi menampilkan minggunya saat lebih dari satu minggu dipilih | **(100%)** 93% |
+| Kam, 6 Agustus | **Topik minggu disimpulkan otomatis** dari isi materi terindeks, bukan dari nama berkas, lalu ditampilkan saat mahasiswa memilih materi | `RAGPipeline.week_topic()` dengan cache; contoh keluaran untuk SBD minggu 1+2: *"Perulangan while dan for, percabangan if-elif-else, operator logika Python, serta klausa IN, agregasi, GROUP BY, HAVING, JOIN, dan INSERT SQL"* | **(100%)** 95% |
+| Kam, 6 Agustus | **Gaya belajar** yang mengganti system prompt LLM beserta keluaran tambahannya — lima gaya: penjelasan bertahap, lewat diagram (Mermaid), lewat contoh & kode (ekspor notebook), poin-poin ringkas, dan dituntun bertanya | `src/learning_styles.py` (baru), `src/generation/notebook.py` (baru), `build_system_prompt(level, style)`, endpoint `GET /learning-styles`; sambutan dan pertanyaan template ikut menyesuaikan gaya | **(100%)** 97% |
+| Kam, 6 Agustus | Penambahan uji otomatis dan pembaruan kontrak API | `tests/test_learning_styles.py` (baru, 30 uji) — total **366 uji lolos** (sebelumnya 316); `docs/CHANGELOG_TIM_BE.md` dan `docs/api/openapi.json` (15 endpoint) diperbarui | **(100%)** 97% |
 
 ---
 
@@ -159,17 +164,17 @@ termasuk alur belajar terpandu beserta kuis di dalam percakapan.
 
 | Indikator | Nilai |
 |---|---|
-| Rentang pengerjaan | 18 Mei – 5 Agustus 2026 (79 hari) |
-| Jumlah aktivitas tercatat | 60 |
-| Aktivitas selesai 100% | 58 dari 60 |
+| Rentang pengerjaan | 18 Mei – 6 Agustus 2026 (80 hari) |
+| Jumlah aktivitas tercatat | 64 |
+| Aktivitas selesai 100% | 62 dari 64 |
 | Jumlah commit | 12 (pekerjaan 21 Juli – 5 Agustus belum di-commit) |
-| Jumlah uji otomatis | 316, seluruhnya lolos |
+| Jumlah uji otomatis | 366, seluruhnya lolos |
 | Format materi didukung | PDF (termasuk hasil pindai via OCR), PPTX, DOCX, XLSX, audio, video |
-| Endpoint API | 18 rute |
+| Endpoint API | 19 rute |
 | Model LLM tersedia | 5 (Qwen 3.7 Flash/Plus, Qwen 3.6 Flash, GPT-4o mini, Llama 3.3 70B) |
 | Waktu jawab | ±86 detik (±50 detik di antaranya untuk *embedding* dan *reranking* pada CPU) |
 | Waktu nyala server | ±10–17 detik, termasuk pemanasan model |
-| Capaian keseluruhan | **92%** |
+| Capaian keseluruhan | **97%** |
 | Sisa pekerjaan | Kualitas *retrieval* (materi salah pada sebagian pertanyaan), optimasi waktu jawab, pembatasan kuota, *deployment* |
 
 ---

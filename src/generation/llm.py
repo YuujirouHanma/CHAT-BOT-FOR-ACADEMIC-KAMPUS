@@ -27,6 +27,7 @@ from src.generation.prompts import (
     FOLLOWUP_SYSTEM_PROMPT,
     QUIZ_SYSTEM_PROMPT,
     STARTER_SYSTEM_PROMPT,
+    WEEK_TOPIC_SYSTEM_PROMPT,
     FormattedContext,
     build_system_prompt,
     build_user_prompt,
@@ -152,12 +153,13 @@ class LLMGenerator:
         context: FormattedContext,
         model: str | None = None,
         level: str | None = None,
+        style: str | None = None,
     ) -> str:
         user_prompt = build_user_prompt(question, context)
         user_content = self._build_user_content(user_prompt, context)
 
         messages: list[Any] = [
-            {"role": "system", "content": build_system_prompt(level)},
+            {"role": "system", "content": build_system_prompt(level, style)},
             {"role": "user", "content": user_content},
         ]
 
@@ -215,8 +217,33 @@ class LLMGenerator:
             return []
         return parse_followup_json(raw)
 
-    async def generate_starter_questions(
+    async def summarize_week_topic(
         self, material_text: str, model: str | None = None
+    ) -> str:
+        """Satu kalimat topik yang dibahas pada minggu tertentu.
+
+        Mengembalikan "" bila gagal — pemanggil cukup menyembunyikan barisnya,
+        karena topik hanyalah pelengkap, bukan syarat alur belajar berjalan.
+        """
+        text = (material_text or "").strip()
+        if not text:
+            return ""
+        messages: list[Any] = [
+            {"role": "system", "content": WEEK_TOPIC_SYSTEM_PROMPT},
+            {"role": "user", "content": f"[ISI MATERI]\n{text}"},
+        ]
+        try:
+            raw = await self._call_with_retry(
+                messages, model=model, temperature=0.2, max_tokens=_AUX_MAX_TOKENS
+            )
+        except Exception as exc:
+            logger.warning("Ringkasan topik minggu gagal: {}", exc)
+            return ""
+        return raw.strip().strip('"').split("\n")[0][:300]
+
+    async def generate_starter_questions(
+        self, material_text: str, model: str | None = None,
+        style_hint: str | None = None,
     ) -> list[str]:
         """Generate template opener questions from a material's text.
 
@@ -226,8 +253,14 @@ class LLMGenerator:
         text = (material_text or "").strip()
         if not text:
             return []
+        # Arahan gaya belajar ikut membentuk pertanyaan pembuka: mahasiswa yang
+        # memilih belajar lewat diagram ditawari pertanyaan tentang alur, yang
+        # memilih praktik ditawari pertanyaan "bagaimana cara".
+        sistem = STARTER_SYSTEM_PROMPT
+        if style_hint:
+            sistem += f" {style_hint}"
         messages: list[Any] = [
-            {"role": "system", "content": STARTER_SYSTEM_PROMPT},
+            {"role": "system", "content": sistem},
             {"role": "user", "content": f"[ISI MATERI]\n{text}"},
         ]
         try:

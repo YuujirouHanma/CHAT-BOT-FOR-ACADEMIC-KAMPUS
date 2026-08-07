@@ -11,7 +11,9 @@ from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from src.api.auth import verify_api_key
-from src.api.routes import batch, browse, catalog, chat, models, upload
+from src.api.routes import (
+    batch, browse, catalog, chat, conversations, models, styles, upload,
+)
 from src.config import settings
 from src.ingestion.nltk_data import warn_if_missing
 from src.pipeline import RAGPipeline
@@ -76,6 +78,8 @@ app.include_router(batch.router, dependencies=_auth)
 app.include_router(browse.router, dependencies=_auth)
 app.include_router(catalog.router, dependencies=_auth)
 app.include_router(models.router, dependencies=_auth)
+app.include_router(styles.router, dependencies=_auth)
+app.include_router(conversations.router, dependencies=_auth)
 app.include_router(chat.router, dependencies=_auth)
 
 

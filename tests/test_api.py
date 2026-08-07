@@ -59,7 +59,7 @@ def _make_pipeline_mock() -> AsyncMock:
             answer_question=True,
             course_id=kwargs.get("course_id"),          # type: ignore[arg-type]
             course_name=kwargs.get("course_name"),      # type: ignore[arg-type]
-            week=kwargs.get("week"),                    # type: ignore[arg-type]
+            weeks=kwargs.get("weeks") or [],            # type: ignore[arg-type]
             content_id=kwargs.get("content_id"),        # type: ignore[arg-type]
             source_file=kwargs.get("source_file"),      # type: ignore[arg-type]
         )
@@ -207,7 +207,7 @@ class TestGuidedChat:
                     Choice(label="Apa itu ERD?", value="Apa itu ERD?", kind="question"),
                 ],
                 course_id="sbd",
-                week=3,
+                weeks=[3],
                 content_id="sbd-minggu-3",
                 source_file="bab3.pdf",
             )
@@ -215,7 +215,7 @@ class TestGuidedChat:
         body = client.post("/chat/ask", json={"question": "bab3.pdf"}).json()
         assert body["recommendations"] == ["Apa itu ERD?"]
         assert body["context"]["course_id"] == "sbd"
-        assert body["context"]["week"] == 3
+        assert body["context"]["weeks"] == [3]
         assert body["context"]["source_file"] == "bab3.pdf"
 
     def test_guided_context_carried_into_query(self, client: TestClient) -> None:
@@ -225,7 +225,7 @@ class TestGuidedChat:
                 step="answer",
                 answer_question=True,
                 course_id="sbd",
-                week=3,
+                weeks=[3],
                 content_id="sbd-minggu-3",
                 source_file="bab3.pdf",
             )
@@ -235,7 +235,7 @@ class TestGuidedChat:
         kwargs = client.mock_pipeline.query.call_args.kwargs  # type: ignore[attr-defined]
         assert kwargs["content_id"] == "sbd-minggu-3"
         assert kwargs["source_filter"] == "bab3.pdf"
-        assert response.json()["context"]["week"] == 3
+        assert response.json()["context"]["weeks"] == [3]
 
     def test_guided_false_skips_guidance(self, client: TestClient) -> None:
         response = client.post(
@@ -256,7 +256,7 @@ class TestGuidedChat:
         )
         kwargs = client.mock_pipeline.guided_turn.call_args.kwargs  # type: ignore[attr-defined]
         assert kwargs["course_id"] == "sbd"
-        assert kwargs["week"] == 3
+        assert kwargs["weeks"] == [3]
 
     def test_week_out_of_range_returns_422(self, client: TestClient) -> None:
         response = client.post("/chat/ask", json={"question": "x", "week": 99})
@@ -269,7 +269,7 @@ class TestGuidedChat:
                 step="question", message="Mau tanya apa?",
                 choices=[Choice(label="Apa itu ERD?", value="Apa itu ERD?",
                                 kind="question")],
-                course_id="sbd", week=3,
+                course_id="sbd", weeks=[3],
                 content_id="sbd-minggu-3", source_file="bab3.pdf",
             )
         )
@@ -296,7 +296,7 @@ class TestQuizInChat:
         client.mock_pipeline.guided_turn = AsyncMock(  # type: ignore[attr-defined]
             return_value=GuidedTurn(
                 step="question", message="Mau tanya apa?",
-                course_id="sbd", week=3,
+                course_id="sbd", weeks=[3],
                 content_id="sbd-minggu-3", source_file="bab3.pdf",
             )
         )

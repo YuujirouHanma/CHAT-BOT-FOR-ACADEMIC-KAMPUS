@@ -123,6 +123,8 @@ class QdrantStore:
         top_k: int | None = None,
         source_filter: str | None = None,
         content_id: str | None = None,
+        course_id: str | None = None,
+        weeks: list[int] | None = None,
     ) -> list[dict]:
         """Hybrid search if sparse vector is given and enabled, else dense-only.
 
@@ -132,13 +134,16 @@ class QdrantStore:
             top_k: Number of results; defaults to settings.retrieval_top_k.
             source_filter: Optional file name to restrict results.
             content_id: Optional content identifier to restrict results.
+            course_id: Optional course to restrict results.
+            weeks: Optional list of weeks; hasil dibatasi ke minggu-minggu itu.
 
         Returns:
             List of dicts: {"chunk_id", "score", "payload"}.
         """
         top_k = top_k or settings.retrieval_top_k
         qfilter = self._build_filter(
-            source_filter=source_filter, content_id=content_id
+            source_filter=source_filter, content_id=content_id,
+            course_id=course_id, weeks=weeks,
         )
 
         use_hybrid = self._enable_sparse and sparse_vector is not None
@@ -317,6 +322,59 @@ class QdrantStore:
             for sf, cid in sorted(seen.items())
         ]
 
+    async def list_materials_for_weeks(
+        self, course_id: str, weeks: list[int]
+    ) -> list[dict]:
+        """Materi untuk beberapa minggu sekaligus, terurut minggu lalu nama berkas.
+
+        Setiap entri membawa `week`-nya sendiri supaya klien dapat menampilkan
+        "Minggu 3 — bab3.pdf" ketika mahasiswa memilih lebih dari satu minggu dan
+        nama berkas saja menjadi ambigu.
+        """
+        if not weeks:
+            return []
+        qfilter = self._build_filter(course_id=course_id, weeks=weeks)
+        payloads = await self._scroll_payloads(
+            ["source_file", "content_id", "week"], qfilter
+        )
+        seen: dict[str, dict] = {}
+        for p in payloads:
+            sf = p.get("source_file")
+            if sf and sf not in seen:
+                seen[sf] = {
+                    "source_file": sf,
+                    "content_id": p.get("content_id"),
+                    "week": p.get("week"),
+                }
+        return sorted(
+            seen.values(), key=lambda m: (m["week"] if m["week"] is not None else 0,
+                                          m["source_file"])
+        )
+
+    async def get_week_text(
+        self, course_id: str, weeks: list[int], max_chars: int = 6000,
+    ) -> str:
+        """Gabungan teks materi pada minggu-minggu tertentu.
+
+        Dipakai untuk menyimpulkan topik apa yang dibahas minggu itu, sehingga
+        chatbot dapat menyebut isinya alih-alih hanya menampilkan nama berkas.
+        """
+        if not weeks:
+            return ""
+        qfilter = self._build_filter(course_id=course_id, weeks=weeks)
+        payloads = await self._scroll_payloads(["text", "source_file"], qfilter)
+        potongan: list[str] = []
+        total = 0
+        for p in payloads:
+            teks = (p.get("text") or "").strip()
+            if not teks:
+                continue
+            potongan.append(teks)
+            total += len(teks)
+            if total >= max_chars:
+                break
+        return "\n\n".join(potongan)[:max_chars]
+
     async def get_material_text(
         self, content_id: str, source_file: str, max_chars: int = 4000,
     ) -> str:
@@ -366,7 +424,15 @@ class QdrantStore:
     def _build_filter(
         source_filter: str | None = None,
         content_id: str | None = None,
+        course_id: str | None = None,
+        weeks: list[int] | None = None,
     ) -> qm.Filter | None:
+        """Filter payload untuk membatasi cakupan pencarian.
+
+        `weeks` berisi SATU ATAU LEBIH minggu — mahasiswa yang sedang menyiapkan
+        ujian sering perlu membaca beberapa minggu sekaligus ("minggu 3 dan 4"),
+        jadi dipakai MatchAny, bukan satu nilai.
+        """
         conditions: list[Any] = []
         if source_filter:
             conditions.append(
@@ -375,6 +441,14 @@ class QdrantStore:
         if content_id:
             conditions.append(
                 qm.FieldCondition(key="content_id", match=qm.MatchValue(value=content_id))
+            )
+        if course_id:
+            conditions.append(
+                qm.FieldCondition(key="course_id", match=qm.MatchValue(value=course_id))
+            )
+        if weeks:
+            conditions.append(
+                qm.FieldCondition(key="week", match=qm.MatchAny(any=sorted(set(weeks))))
             )
         if not conditions:
             return None

@@ -92,6 +92,9 @@ data/hitl_logs/
 # Generated content cache (starter questions, quiz) — dibuat ulang otomatis
 data/gen_cache/
 
+# Isi percakapan mahasiswa — data pribadi, jangan pernah masuk repositori.
+data/conversations/
+
 # Local tool & editor settings
 .claude/
 pyrightconfig.json

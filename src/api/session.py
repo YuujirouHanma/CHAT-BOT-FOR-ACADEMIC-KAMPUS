@@ -1,9 +1,17 @@
-"""In-memory session manager for chat context."""
+"""Session percakapan: konteks belajar, riwayat, dan penyimpanannya.
+
+Session hidup di memori selama dipakai, dan setiap perubahan ditulis ke disk
+lewat `conversation_store`. Karena itu `session_id` sekaligus menjadi identitas
+percakapan yang dapat dibuka kembali berhari-hari kemudian — klien tidak perlu
+mengenal konsep kedua.
+"""
 from __future__ import annotations
 
 import time
 import uuid
 from dataclasses import dataclass, field
+
+from src.storage import conversation_store
 
 TTL_SECONDS = 3600
 
@@ -18,15 +26,94 @@ class Session:
     # sebuah materi (dan content_id-nya) ditentukan.
     course_id: str | None = None
     course_name: str | None = None
-    week: int | None = None
+    # Bisa lebih dari satu: mahasiswa yang menyiapkan ujian kerap belajar
+    # beberapa minggu sekaligus ("minggu 3 dan 4").
+    weeks: list[int] = field(default_factory=list)
+    # Topik yang dibahas pada minggu terpilih, disimpulkan dari isi materi.
+    topic: str | None = None
+    # Gaya belajar pilihan mahasiswa; menentukan system prompt LLM.
+    style: str | None = None
     # Langkah yang sedang ditanyakan chatbot. Nilainya melonggarkan penafsiran
     # pesan berikutnya: saat menanyakan minggu, "3" boleh berarti minggu 3.
     awaiting: str | None = None
     # Kuis yang sedang dikerjakan di dalam chat: {questions, answers, index}.
     # Disimpan di session karena kuis berlangsung lintas beberapa pesan.
     quiz: dict | None = None
+    # Konteks untuk LLM: hanya tanya-jawab sungguhan, tanpa klik menu.
     history: list[dict] = field(default_factory=list)
+    # Untuk ditampilkan ulang: SEMUA yang muncul di layar, termasuk navigasi.
+    transcript: list[dict] = field(default_factory=list)
+    student_id: str | None = None
+    title: str = ""
+    created_at: str = field(default_factory=conversation_store.now_iso)
+    updated_at: str = field(default_factory=conversation_store.now_iso)
     last_active: float = field(default_factory=time.monotonic)
+
+    # --- riwayat yang ditampilkan ---
+    def record(self, role: str, content: str, **extra: object) -> None:
+        """Catat satu pesan ke transkrip tampilan.
+
+        Judul percakapan diambil dari pesan berisi pertama mahasiswa — sapaan
+        seperti "halo" dilewati karena tidak memberi tahu isi percakapan.
+        """
+        entry: dict = {"role": role, "content": content,
+                       "at": conversation_store.now_iso()}
+        entry.update({k: v for k, v in extra.items() if v not in (None, [], "")})
+        self.transcript.append(entry)
+        if role == "user" and not self.title and len(content.strip()) > 4:
+            self.title = conversation_store.make_title(content)
+        self.updated_at = conversation_store.now_iso()
+        self.touch()
+
+    def to_record(self) -> dict:
+        """Bentuk yang disimpan ke disk."""
+        return {
+            "conversation_id": self.session_id,
+            "student_id": self.student_id,
+            "title": self.title or "Percakapan baru",
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "context": {
+                "course_id": self.course_id,
+                "course_name": self.course_name,
+                "weeks": self.weeks,
+                "content_id": self.content_id,
+                "source_file": self.source_filter,
+                "style": self.style,
+                "topic": self.topic,
+            },
+            "transcript": self.transcript,
+            "history": self.history,
+        }
+
+    @classmethod
+    def from_record(cls, d: dict) -> Session:
+        """Bangun ulang session dari berkas tersimpan.
+
+        Kuis yang sedang berjalan sengaja TIDAK dipulihkan: melanjutkan kuis
+        berhari-hari kemudian di tengah soal lebih membingungkan daripada
+        memulainya lagi.
+        """
+        ctx = d.get("context") or {}
+        return cls(
+            session_id=d.get("conversation_id", str(uuid.uuid4())),
+            student_id=d.get("student_id"),
+            title=d.get("title", ""),
+            created_at=d.get("created_at") or conversation_store.now_iso(),
+            updated_at=d.get("updated_at") or conversation_store.now_iso(),
+            course_id=ctx.get("course_id"),
+            course_name=ctx.get("course_name"),
+            weeks=list(ctx.get("weeks") or []),
+            content_id=ctx.get("content_id"),
+            source_filter=ctx.get("source_file"),
+            style=ctx.get("style"),
+            topic=ctx.get("topic"),
+            transcript=list(d.get("transcript") or []),
+            history=list(d.get("history") or []),
+        )
+
+    def persist(self) -> None:
+        conversation_store.save(self.to_record())
 
     def start_quiz(self, questions: list[dict]) -> None:
         self.quiz = {"questions": questions, "answers": [], "index": 0}
@@ -62,7 +149,7 @@ class Session:
         self,
         course_id: str | None = None,
         course_name: str | None = None,
-        week: int | None = None,
+        weeks: list[int] | None = None,
         content_id: str | None = None,
         source_filter: str | None = None,
     ) -> None:
@@ -75,14 +162,14 @@ class Session:
         if course_id is not None and course_id != self.course_id:
             self.course_id = course_id
             self.course_name = course_name
-            self.week = None
+            self.weeks = []
             self.content_id = None
             self.source_filter = None
         elif course_name and self.course_name is None:
             self.course_name = course_name
 
-        if week is not None and week != self.week:
-            self.week = week
+        if weeks and sorted(weeks) != self.weeks:
+            self.weeks = sorted(set(weeks))
             self.content_id = None
             self.source_filter = None
 
@@ -96,7 +183,7 @@ class Session:
         self,
         course_id: str | None,
         course_name: str | None,
-        week: int | None,
+        weeks: list[int] | None,
         content_id: str | None,
         source_filter: str | None,
     ) -> None:
@@ -109,7 +196,7 @@ class Session:
         """
         self.course_id = course_id
         self.course_name = course_name
-        self.week = week
+        self.weeks = sorted(set(weeks)) if weeks else []
         self.content_id = content_id
         self.source_filter = source_filter
         self.touch()
@@ -118,7 +205,8 @@ class Session:
         """Kembali ke langkah awal tanpa kehilangan riwayat percakapan."""
         self.course_id = None
         self.course_name = None
-        self.week = None
+        self.weeks = []
+        self.topic = None
         self.content_id = None
         self.source_filter = None
         self.awaiting = None
@@ -132,30 +220,51 @@ class Session:
 
 
 class SessionStore:
+    """Session aktif di memori, dengan disk sebagai sumber jangka panjang.
+
+    Kedaluwarsa di memori hanya membebaskan RAM — percakapannya tetap ada di
+    disk, dan permintaan berikutnya dengan `session_id` yang sama akan
+    memuatnya kembali. Itulah yang membuat riwayat dapat dibuka lagi.
+    """
+
     def __init__(self) -> None:
         self._sessions: dict[str, Session] = {}
 
-    def create(self) -> Session:
-        s = Session(session_id=str(uuid.uuid4()))
+    def create(self, student_id: str | None = None) -> Session:
+        s = Session(session_id=str(uuid.uuid4()), student_id=student_id)
         self._sessions[s.session_id] = s
         return s
 
     def get(self, session_id: str) -> Session | None:
+        """Session dari memori, atau dimuat ulang dari disk bila sudah lewat TTL."""
         s = self._sessions.get(session_id)
-        if s is None:
-            return None
-        if s.is_expired():
+        if s is not None and not s.is_expired():
+            s.touch()
+            return s
+        if s is not None:
             del self._sessions[session_id]
-            return None
-        s.touch()
-        return s
 
-    def get_or_create(self, session_id: str | None) -> Session:
+        record = conversation_store.load(session_id)
+        if record is None:
+            return None
+        pulih = Session.from_record(record)
+        self._sessions[pulih.session_id] = pulih
+        return pulih
+
+    def get_or_create(
+        self, session_id: str | None, student_id: str | None = None,
+    ) -> Session:
         if session_id:
             s = self.get(session_id)
             if s:
+                if student_id and not s.student_id:
+                    s.student_id = student_id
                 return s
-        return self.create()
+        return self.create(student_id)
+
+    def drop(self, session_id: str) -> None:
+        """Buang dari memori. Penghapusan berkasnya urusan pemanggil."""
+        self._sessions.pop(session_id, None)
 
 
 session_store = SessionStore()

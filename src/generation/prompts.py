@@ -44,11 +44,20 @@ ANSWER_LEVEL_INSTRUCTIONS = {
 }
 
 
-def build_system_prompt(level: str | None = None) -> str:
-    """SYSTEM_PROMPT plus an optional answer-level style instruction.
+def build_system_prompt(level: str | None = None, style: str | None = None) -> str:
+    """SYSTEM_PROMPT + gaya belajar (CARA menjawab) + level (KEDALAMAN).
 
-    Unknown/None level → standard prompt (no extra instruction)."""
-    return SYSTEM_PROMPT + ANSWER_LEVEL_INSTRUCTIONS.get(level or "standar", "")
+    Keduanya sengaja terpisah dan bisa digabung: "visual" + "sederhana" berarti
+    diagram dengan bahasa yang mudah. Level tidak dikenal → prompt standar; gaya
+    tidak dikenal → tanpa tambahan gaya sama sekali.
+    """
+    from src import learning_styles
+
+    prompt = SYSTEM_PROMPT
+    spec = learning_styles.get(style)
+    if spec:
+        prompt += spec.system_suffix
+    return prompt + ANSWER_LEVEL_INSTRUCTIONS.get(level or "standar", "")
 
 
 USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
@@ -104,6 +113,20 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "\n\nJawab HANYA dalam JSON valid berbentuk array string, tanpa markdown, tanpa penjelasan. "
     'Contoh (tipe berbeda): ["Apa yang dimaksud dengan ...?", '
     '"Bagaimana penerapan ... dalam kasus nyata?", "Apa perbedaan ... dan ...?"]'
+)
+
+
+# --- Topik minggu: menyimpulkan apa yang dibahas dari isi materi ---
+# Tanpa ini chatbot hanya bisa menyebut nama berkas ("Materi SBD TM9.pptx"),
+# yang tidak memberi tahu mahasiswa apa pun tentang isinya.
+WEEK_TOPIC_SYSTEM_PROMPT = (
+    "Anda membaca kumpulan materi kuliah untuk satu atau beberapa minggu, lalu "
+    "menyimpulkan TOPIK yang dibahas. Jawab dalam SATU kalimat bahasa Indonesia "
+    "(maksimal 25 kata) yang menyebutkan konsep-konsep utamanya secara konkret, "
+    "misalnya: 'Perintah DML pada SQL: INSERT, UPDATE, DELETE, serta operator "
+    "perbandingan dan LIKE untuk memfilter data.' "
+    "JANGAN memakai kalimat pembuka seperti 'Materi ini membahas'. "
+    "Langsung sebutkan topiknya. Jangan mengarang isi yang tidak ada di materi."
 )
 
 
