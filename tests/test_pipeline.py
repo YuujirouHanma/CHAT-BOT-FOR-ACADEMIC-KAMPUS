@@ -14,6 +14,7 @@ import pytest
 from src.generation.prompts import FormattedContext
 from src.pipeline import RAGPipeline
 from src.schemas import Chunk, ElementType, ParsedElement
+from tests.conftest import TEST_TENANT_ID as TENANT
 
 
 def _parsed_element(element_id: str = "e1") -> ParsedElement:
@@ -94,7 +95,7 @@ class TestGradeQuiz:
         pipeline, _ = _make_pipeline()
         with patch("src.pipeline.gen_cache.load", return_value=self._QUIZ), \
              patch("src.pipeline.log_quiz_attempt", return_value="quiz_1"):
-            res = await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[1, 0, 0])
+            res = await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[1, 0, 0], tenant_id=TENANT)
 
         assert res["total"] == 3
         assert res["correct"] == 2  # Q1 & Q3 right, Q2 wrong
@@ -108,7 +109,9 @@ class TestGradeQuiz:
         pipeline, _ = _make_pipeline()
         with patch("src.pipeline.gen_cache.load", return_value=self._QUIZ), \
              patch("src.pipeline.log_quiz_attempt", return_value="quiz_2"):
-            res = await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[1])  # only 1 of 3
+            res = await pipeline.grade_quiz(          # hanya 1 dari 3 soal dijawab
+                "sbd-w2", "x.pdf", answers=[1], tenant_id=TENANT,
+            )
 
         assert res["correct"] == 1
         assert res["results"][2]["your_answer"] is None
@@ -121,7 +124,7 @@ class TestGradeQuiz:
         mocks["store"].get_material_text = AsyncMock(return_value="")
         with patch("src.pipeline.gen_cache.load", return_value=None):
             with pytest.raises(ValueError, match="tidak tersedia"):
-                await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[0])
+                await pipeline.grade_quiz("sbd-w2", "x.pdf", answers=[0], tenant_id=TENANT)
 
 
 class TestIndexDocument:
@@ -139,7 +142,7 @@ class TestIndexDocument:
             new_callable=AsyncMock,
             return_value=[_parsed_element()],
         ) as enrich:
-            result = await pipeline.index_document(doc)
+            result = await pipeline.index_document(doc, tenant_id=TENANT)
 
         enrich.assert_awaited_once()
         mocks["chunker"].chunk.assert_called_once()
@@ -158,7 +161,7 @@ class TestIndexDocument:
         doc.write_bytes(b"empty")
 
         with patch("src.pipeline.parse_document", return_value=[]):
-            result = await pipeline.index_document(doc)
+            result = await pipeline.index_document(doc, tenant_id=TENANT)
 
         assert result.elements_parsed == 0
         assert result.chunks_created == 0
@@ -182,7 +185,7 @@ class TestIndexDocument:
             new_callable=AsyncMock,
             return_value=[_parsed_element()],
         ):
-            result = await pipeline.index_document(doc)
+            result = await pipeline.index_document(doc, tenant_id=TENANT)
 
         assert result.chunks_created == 0
         mocks["embedder"].embed_chunks.assert_not_awaited()
@@ -210,7 +213,7 @@ class TestQuery:
             return_value=retriever_results
         )
 
-        result = await pipeline.query("Apa itu X?")
+        result = await pipeline.query("Apa itu X?", tenant_id=TENANT)
 
         assert result.answer == "Jawaban final."
         assert len(result.sources) == 1
@@ -223,7 +226,7 @@ class TestQuery:
         pipeline, mocks = _make_pipeline()
         pipeline._retriever.retrieve = AsyncMock(return_value=[])  # type: ignore[method-assign]
 
-        result = await pipeline.query("Pertanyaan obscure?")
+        result = await pipeline.query("Pertanyaan obscure?", tenant_id=TENANT)
 
         assert "tidak mencakup" in result.answer
         assert result.sources == []
@@ -235,11 +238,11 @@ class TestQuery:
         retrieve_mock = AsyncMock(return_value=[])
         pipeline._retriever.retrieve = retrieve_mock  # type: ignore[method-assign]
 
-        await pipeline.query("q", source_filter="specific.pdf")
+        await pipeline.query("q", source_filter="specific.pdf", tenant_id=TENANT)
 
         retrieve_mock.assert_awaited_once_with(
             query="q", content_id=None, source_filter="specific.pdf",
-            course_id=None, weeks=None,
+            course_id=None, weeks=None, tenant_id=TENANT,
         )
 
     @pytest.mark.asyncio
@@ -257,7 +260,7 @@ class TestQuery:
         retrieve_mock = AsyncMock(return_value=[])
         pipeline._retriever.retrieve = retrieve_mock  # type: ignore[method-assign]
 
-        await pipeline.query("apa itu perulangan?")
+        await pipeline.query("apa itu perulangan?", tenant_id=TENANT)
 
         assert retrieve_mock.await_args is not None
         assert retrieve_mock.await_args.kwargs["query"].startswith("penjelasan lengkap")
@@ -282,11 +285,14 @@ class TestQuery:
             return_value=retriever_results
         )
 
-        await pipeline.query("q")
+        await pipeline.query("q", tenant_id=TENANT)
 
         call_args = mocks["generator"].generate.call_args
         question_arg = call_args.args[0] if call_args.args else call_args.kwargs.get("question")
-        context_arg = call_args.args[1] if len(call_args.args) > 1 else call_args.kwargs.get("context")
+        context_arg = (
+            call_args.args[1] if len(call_args.args) > 1
+            else call_args.kwargs.get("context")
+        )
 
         assert question_arg == "q"
         assert isinstance(context_arg, FormattedContext)

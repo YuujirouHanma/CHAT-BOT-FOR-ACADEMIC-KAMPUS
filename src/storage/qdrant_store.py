@@ -1,9 +1,29 @@
-"""Qdrant vector store wrapper.
+"""Qdrant vector store wrapper — multi-tenant.
 
 Collection layout — designed for bge-m3 hybrid search:
 - One named DENSE vector ("dense") with cosine distance and dim from settings.
 - One named SPARSE vector ("sparse"), enabled when settings.enable_hybrid_search.
 - Payload mirrors the Chunk schema except the embeddings themselves.
+
+ISOLASI ANTAR TENANT — bagian terpenting berkas ini
+---------------------------------------------------
+Satu koleksi dipakai bersama seluruh pelanggan, dibedakan oleh field payload
+`tenant_id`. Agar pola itu aman, dua hal ditegakkan secara struktural, bukan
+lewat kedisiplinan pemanggil:
+
+1. `tenant_id` adalah argumen WAJIB berjenis keyword-only tanpa nilai bawaan
+   pada setiap metode publik. Lupa mengirimnya menjadi TypeError saat pemanggilan
+   — bukan pencarian diam-diam ke seluruh korpus lintas pelanggan.
+2. `_build_filter()` SELALU mengembalikan filter berisi kondisi `tenant_id`, dan
+   tidak pernah `None`. Sebelumnya fungsi ini mengembalikan `None` ketika tak ada
+   penyaring, yang berarti "cari di semua" — persis jalur yang membocorkan data
+   begitu ada pelanggan kedua. Jalur itu kini tidak ada lagi.
+
+Mengapa field payload, bukan satu koleksi per tenant: koleksi Qdrant membawa
+biaya tetap (segmen, indeks HNSW, memori) yang tidak masuk akal dikalikan jumlah
+pelanggan, dan menambah pelanggan baru jadi menuntut operasi administratif.
+Qdrant sendiri menganjurkan pola payload + indeks bertanda tenant, yang juga
+mengelompokkan data satu tenant berdekatan di disk sehingga kuerinya lebih cepat.
 
 Operations are async. Real Qdrant calls use `asyncio.to_thread` because the
 official client is sync (AsyncQdrantClient exists but has fewer features
@@ -23,11 +43,16 @@ from qdrant_client.http import models as qm
 
 from src.config import settings
 from src.schemas import Chunk
+from src.tenancy import TenantScopeError, require_tenant_id
 from src.utils.logger import logger
 
 _DENSE_VEC = "dense"
 _SPARSE_VEC = "sparse"
 _UPSERT_BATCH = 64
+
+# Field payload yang membawa pemilik data. Namanya dipakai juga sebagai kunci
+# indeks bertanda tenant di Qdrant.
+TENANT_FIELD = "tenant_id"
 
 
 class QdrantStore:
@@ -64,12 +89,13 @@ class QdrantStore:
         return QdrantClient(path=settings.qdrant_path)
 
     async def ensure_collection(self) -> None:
-        """Create the collection if it doesn't exist. Idempotent."""
+        """Create the collection if it doesn't exist, then ensure indexes. Idempotent."""
         exists = await asyncio.to_thread(
             self._client.collection_exists, self._collection
         )
         if exists:
             logger.info("Qdrant collection '{}' already exists", self._collection)
+            await self._ensure_tenant_index()
             return
 
         vectors_config = {
@@ -96,13 +122,67 @@ class QdrantStore:
             settings.embed_dim,
             self._enable_sparse,
         )
+        await self._ensure_tenant_index()
 
-    async def upsert_chunks(self, chunks: Sequence[Chunk]) -> int:
-        """Upsert chunks in batches. Returns number of points written."""
+    async def _ensure_tenant_index(self) -> None:
+        """Indeks payload untuk `tenant_id`, ditandai sebagai kunci tenant.
+
+        Tanpa indeks ini setiap kueri memindai seluruh koleksi lalu membuang
+        milik tenant lain — benar tetapi semakin lambat seiring bertambahnya
+        pelanggan. Dengan `is_tenant=True`, Qdrant menata data satu tenant
+        berdekatan di disk sehingga kuerinya menyentuh jauh lebih sedikit segmen.
+
+        Aman diulang. Kegagalan tidak menghentikan startup: indeks ini soal
+        kinerja, sedangkan kebenaran isolasi dijamin oleh filternya.
+        """
+        try:
+            try:
+                skema: Any = qm.KeywordIndexParams(
+                    type=qm.KeywordIndexType.KEYWORD, is_tenant=True,
+                )
+            except (AttributeError, TypeError):
+                # Qdrant/klien lama belum mengenal `is_tenant`; indeks biasa
+                # tetap memberi manfaat penyaringan, hanya tanpa penataan disk.
+                skema = qm.PayloadSchemaType.KEYWORD
+
+            await asyncio.to_thread(
+                self._client.create_payload_index,
+                collection_name=self._collection,
+                field_name=TENANT_FIELD,
+                field_schema=skema,
+            )
+            logger.info("Indeks payload '{}' siap", TENANT_FIELD)
+        except Exception as exc:
+            logger.warning(
+                "Indeks tenant belum terpasang ({}). Isolasi tetap aman, "
+                "tetapi kueri akan melambat seiring bertambahnya tenant.", exc,
+            )
+
+    async def upsert_chunks(
+        self, chunks: Sequence[Chunk], *, tenant_id: str,
+    ) -> int:
+        """Upsert chunks in batches. Returns number of points written.
+
+        Setiap potongan dicap `tenant_id` di sini. Potongan yang sudah membawa
+        `tenant_id` BERBEDA ditolak — kalau sampai terjadi, ada percampuran data
+        di lapisan atas, dan menulisnya berarti menanam kebocoran permanen di
+        dalam index yang baru ketahuan jauh belakangan.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="upsert_chunks")
         if not chunks:
             return 0
 
-        points = [self._chunk_to_point(c) for c in chunks]
+        asing = [
+            c.chunk_id for c in chunks
+            if c.tenant_id is not None and c.tenant_id != tenant_id
+        ]
+        if asing:
+            raise TenantScopeError(
+                f"{len(asing)} potongan membawa tenant_id berbeda dari '{tenant_id}' "
+                f"(mis. {asing[0]}); penulisan dibatalkan."
+            )
+
+        points = [self._chunk_to_point(c, tenant_id) for c in chunks]
         total = 0
         for batch_start in range(0, len(points), _UPSERT_BATCH):
             batch = points[batch_start : batch_start + _UPSERT_BATCH]
@@ -113,7 +193,9 @@ class QdrantStore:
                 wait=True,
             )
             total += len(batch)
-        logger.info("Upserted {} points to '{}'", total, self._collection)
+        logger.info(
+            "Upserted {} points to '{}' (tenant={})", total, self._collection, tenant_id,
+        )
         return total
 
     async def search(
@@ -125,6 +207,8 @@ class QdrantStore:
         content_id: str | None = None,
         course_id: str | None = None,
         weeks: list[int] | None = None,
+        *,
+        tenant_id: str,
     ) -> list[dict]:
         """Hybrid search if sparse vector is given and enabled, else dense-only.
 
@@ -136,13 +220,15 @@ class QdrantStore:
             content_id: Optional content identifier to restrict results.
             course_id: Optional course to restrict results.
             weeks: Optional list of weeks; hasil dibatasi ke minggu-minggu itu.
+            tenant_id: WAJIB. Pemilik data yang boleh dicari.
 
         Returns:
             List of dicts: {"chunk_id", "score", "payload"}.
         """
+        tenant_id = require_tenant_id(tenant_id, operation="search")
         top_k = top_k or settings.retrieval_top_k
         qfilter = self._build_filter(
-            source_filter=source_filter, content_id=content_id,
+            tenant_id=tenant_id, source_filter=source_filter, content_id=content_id,
             course_id=course_id, weeks=weeks,
         )
 
@@ -207,13 +293,16 @@ class QdrantStore:
     async def list_indexed_files(
         self,
         content_id: str | None = None,
+        *,
+        tenant_id: str,
     ) -> list[dict]:
         """Return unique source files indexed for the given content_id.
 
         Scrolls Qdrant with an optional content_id filter and deduplicates
         by source_file. Returns list of {"source_file", "content_id"}.
         """
-        qfilter = self._build_filter(content_id=content_id)
+        tenant_id = require_tenant_id(tenant_id, operation="list_indexed_files")
+        qfilter = self._build_filter(tenant_id=tenant_id, content_id=content_id)
 
         seen: set[str] = set()
         results: list[dict] = []
@@ -244,9 +333,15 @@ class QdrantStore:
         return results
 
     async def _scroll_payloads(
-        self, fields: list[str], qfilter: qm.Filter | None = None,
+        self, fields: list[str], qfilter: qm.Filter,
     ) -> list[dict]:
-        """Scroll the whole collection, returning payloads projected to `fields`."""
+        """Scroll the collection, returning payloads projected to `fields`.
+
+        `qfilter` bukan opsional: setiap pemanggil membangunnya lewat
+        `_build_filter`, yang selalu menyertakan `tenant_id`. Menjadikannya wajib
+        di sini menutup kemungkinan seseorang menambah pemanggil baru yang lupa
+        menyaring, lalu memindai data seluruh pelanggan.
+        """
         payloads: list[dict] = []
         offset: Any = None
         while True:
@@ -265,7 +360,7 @@ class QdrantStore:
             offset = next_offset
         return payloads
 
-    async def list_courses(self) -> list[dict]:
+    async def list_courses(self, *, tenant_id: str) -> list[dict]:
         """Distinct courses that have indexed content. [{course_id, course_name}].
 
         When a course has both a custom display name (sent explicitly at upload)
@@ -274,7 +369,10 @@ class QdrantStore:
         """
         from src.catalog import humanize_course
 
-        payloads = await self._scroll_payloads(["course_id", "course_name"])
+        tenant_id = require_tenant_id(tenant_id, operation="list_courses")
+        payloads = await self._scroll_payloads(
+            ["course_id", "course_name"], self._build_filter(tenant_id=tenant_id),
+        )
         courses: dict[str, str] = {}
         for p in payloads:
             cid = p.get("course_id")
@@ -290,26 +388,25 @@ class QdrantStore:
             for cid, name in sorted(courses.items())
         ]
 
-    async def list_weeks(self, course_id: str) -> list[int]:
+    async def list_weeks(self, course_id: str, *, tenant_id: str) -> list[int]:
         """Distinct weeks with indexed content for a course, ascending."""
-        qfilter = qm.Filter(
-            must=[qm.FieldCondition(key="course_id", match=qm.MatchValue(value=course_id))]
-        )
+        tenant_id = require_tenant_id(tenant_id, operation="list_weeks")
+        qfilter = self._build_filter(tenant_id=tenant_id, course_id=course_id)
         payloads = await self._scroll_payloads(["week"], qfilter)
         weeks = {p["week"] for p in payloads if p.get("week") is not None}
         return sorted(weeks)
 
-    async def list_materials(self, course_id: str, week: int) -> list[dict]:
+    async def list_materials(
+        self, course_id: str, week: int, *, tenant_id: str,
+    ) -> list[dict]:
         """Distinct materials (source files) for a course+week.
 
         Returns [{source_file, content_id}] — source_file is what the student
         picks; content_id is what /chat/ask needs.
         """
-        qfilter = qm.Filter(
-            must=[
-                qm.FieldCondition(key="course_id", match=qm.MatchValue(value=course_id)),
-                qm.FieldCondition(key="week", match=qm.MatchValue(value=week)),
-            ]
+        tenant_id = require_tenant_id(tenant_id, operation="list_materials")
+        qfilter = self._build_filter(
+            tenant_id=tenant_id, course_id=course_id, weeks=[week],
         )
         payloads = await self._scroll_payloads(["source_file", "content_id"], qfilter)
         seen: dict[str, str | None] = {}
@@ -323,7 +420,7 @@ class QdrantStore:
         ]
 
     async def list_materials_for_weeks(
-        self, course_id: str, weeks: list[int]
+        self, course_id: str, weeks: list[int], *, tenant_id: str,
     ) -> list[dict]:
         """Materi untuk beberapa minggu sekaligus, terurut minggu lalu nama berkas.
 
@@ -331,9 +428,12 @@ class QdrantStore:
         "Minggu 3 — bab3.pdf" ketika mahasiswa memilih lebih dari satu minggu dan
         nama berkas saja menjadi ambigu.
         """
+        tenant_id = require_tenant_id(tenant_id, operation="list_materials_for_weeks")
         if not weeks:
             return []
-        qfilter = self._build_filter(course_id=course_id, weeks=weeks)
+        qfilter = self._build_filter(
+            tenant_id=tenant_id, course_id=course_id, weeks=weeks,
+        )
         payloads = await self._scroll_payloads(
             ["source_file", "content_id", "week"], qfilter
         )
@@ -353,15 +453,19 @@ class QdrantStore:
 
     async def get_week_text(
         self, course_id: str, weeks: list[int], max_chars: int = 6000,
+        *, tenant_id: str,
     ) -> str:
         """Gabungan teks materi pada minggu-minggu tertentu.
 
         Dipakai untuk menyimpulkan topik apa yang dibahas minggu itu, sehingga
         chatbot dapat menyebut isinya alih-alih hanya menampilkan nama berkas.
         """
+        tenant_id = require_tenant_id(tenant_id, operation="get_week_text")
         if not weeks:
             return ""
-        qfilter = self._build_filter(course_id=course_id, weeks=weeks)
+        qfilter = self._build_filter(
+            tenant_id=tenant_id, course_id=course_id, weeks=weeks,
+        )
         payloads = await self._scroll_payloads(["text", "source_file"], qfilter)
         potongan: list[str] = []
         total = 0
@@ -377,16 +481,15 @@ class QdrantStore:
 
     async def get_material_text(
         self, content_id: str, source_file: str, max_chars: int = 4000,
+        *, tenant_id: str,
     ) -> str:
         """Concatenate the indexed text of one material, capped at max_chars.
 
         Used to auto-generate starter questions from the material content.
         """
-        qfilter = qm.Filter(
-            must=[
-                qm.FieldCondition(key="content_id", match=qm.MatchValue(value=content_id)),
-                qm.FieldCondition(key="source_file", match=qm.MatchValue(value=source_file)),
-            ]
+        tenant_id = require_tenant_id(tenant_id, operation="get_material_text")
+        qfilter = self._build_filter(
+            tenant_id=tenant_id, content_id=content_id, source_filter=source_file,
         )
         payloads = await self._scroll_payloads(["text", "chunk_index"], qfilter)
         payloads.sort(key=lambda p: p.get("chunk_index") or 0)
@@ -402,38 +505,88 @@ class QdrantStore:
                 break
         return "\n\n".join(parts)[:max_chars]
 
-    async def delete_by_source(self, source_file: str) -> None:
-        """Delete all chunks belonging to one source file."""
+    async def get_content_course(
+        self, content_id: str, *, tenant_id: str,
+    ) -> str | None:
+        """Mata kuliah pemilik sebuah materi; None bila materinya tidak ada.
+
+        Dibaca dari payload yang benar-benar terindeks, bukan diturunkan dari
+        pola nama `content_id`. Keduanya biasanya sama, tetapi `course_id` boleh
+        dikirim eksplisit saat unggah — dan bila keduanya berbeda, menebak dari
+        nama akan memberi jawaban yang salah tepat pada pemeriksaan hak akses.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="get_content_course")
+        payloads = await self._scroll_payloads(
+            ["course_id"],
+            self._build_filter(tenant_id=tenant_id, content_id=content_id),
+        )
+        for p in payloads:
+            if p.get("course_id"):
+                return str(p["course_id"])
+        return None
+
+    async def delete_by_source(self, source_file: str, *, tenant_id: str) -> None:
+        """Delete all chunks belonging to one source file, milik tenant ini saja.
+
+        Filter tenant di sini bukan sekadar kerapian: tanpa itu, dua pelanggan
+        yang kebetulan mengunggah berkas bernama sama ("bab1.pdf") akan saling
+        menghapus materi — kehilangan data permanen tanpa jejak yang jelas.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="delete_by_source")
         await asyncio.to_thread(
             self._client.delete,
             collection_name=self._collection,
             points_selector=qm.FilterSelector(
-                filter=qm.Filter(
-                    must=[
-                        qm.FieldCondition(
-                            key="source_file",
-                            match=qm.MatchValue(value=source_file),
-                        )
-                    ]
+                filter=self._build_filter(
+                    tenant_id=tenant_id, source_filter=source_file,
                 )
             ),
         )
-        logger.info("Deleted all chunks for source_file='{}'", source_file)
+        logger.info(
+            "Deleted chunks for source_file='{}' (tenant={})", source_file, tenant_id,
+        )
+
+    async def delete_tenant_data(self, *, tenant_id: str) -> None:
+        """Hapus SELURUH data satu tenant dari index.
+
+        Dibutuhkan saat pelanggan berhenti berlangganan: hak untuk dihapus bukan
+        hal yang bisa dikerjakan belakangan dengan skrip manual.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="delete_tenant_data")
+        await asyncio.to_thread(
+            self._client.delete,
+            collection_name=self._collection,
+            points_selector=qm.FilterSelector(
+                filter=self._build_filter(tenant_id=tenant_id)
+            ),
+        )
+        logger.warning("Seluruh data index tenant '{}' dihapus", tenant_id)
 
     @staticmethod
     def _build_filter(
+        *,
+        tenant_id: str,
         source_filter: str | None = None,
         content_id: str | None = None,
         course_id: str | None = None,
         weeks: list[int] | None = None,
-    ) -> qm.Filter | None:
+    ) -> qm.Filter:
         """Filter payload untuk membatasi cakupan pencarian.
+
+        SELALU memuat `tenant_id`, dan tidak pernah mengembalikan `None`. Versi
+        sebelumnya mengembalikan `None` bila tak ada penyaring — yang di Qdrant
+        berarti "cari di seluruh koleksi". Dengan satu koleksi dipakai bersama,
+        jalur itulah yang membocorkan materi antar kampus, dan ia sengaja
+        dihilangkan sepenuhnya di sini.
 
         `weeks` berisi SATU ATAU LEBIH minggu — mahasiswa yang sedang menyiapkan
         ujian sering perlu membaca beberapa minggu sekaligus ("minggu 3 dan 4"),
         jadi dipakai MatchAny, bukan satu nilai.
         """
-        conditions: list[Any] = []
+        tenant_id = require_tenant_id(tenant_id, operation="_build_filter")
+        conditions: list[Any] = [
+            qm.FieldCondition(key=TENANT_FIELD, match=qm.MatchValue(value=tenant_id)),
+        ]
         if source_filter:
             conditions.append(
                 qm.FieldCondition(key="source_file", match=qm.MatchValue(value=source_filter))
@@ -450,11 +603,9 @@ class QdrantStore:
             conditions.append(
                 qm.FieldCondition(key="week", match=qm.MatchAny(any=sorted(set(weeks))))
             )
-        if not conditions:
-            return None
         return qm.Filter(must=conditions)
 
-    def _chunk_to_point(self, chunk: Chunk) -> qm.PointStruct:
+    def _chunk_to_point(self, chunk: Chunk, tenant_id: str) -> qm.PointStruct:
         if chunk.dense_embedding is None:
             raise ValueError(
                 f"Chunk {chunk.chunk_id} has no dense embedding; "
@@ -471,6 +622,7 @@ class QdrantStore:
             )
 
         payload = {
+            TENANT_FIELD: tenant_id,
             "text": chunk.text,
             "parent_element_id": chunk.parent_element_id,
             "element_type": chunk.element_type.value,

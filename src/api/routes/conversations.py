@@ -12,8 +12,14 @@ ditampilkan ulang, dan menghapus.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
+from src.api.auth import (
+    client_ip,
+    request_id,
+    tenant_conversation_delete,
+    tenant_conversation_read,
+)
 from src.api.schemas import (
     ChatContext,
     ConversationDetail,
@@ -22,7 +28,9 @@ from src.api.schemas import (
     TranscriptMessage,
 )
 from src.api.session import session_store
+from src.security import audit
 from src.storage import conversation_store
+from src.tenancy import TenantContext
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
 
@@ -45,12 +53,16 @@ def _context(d: dict) -> ChatContext:
 async def list_conversations(
     student_id: str | None = Query(
         default=None,
-        description="Saring hanya percakapan milik mahasiswa ini. "
-                    "Tanpa ini, seluruh percakapan dikembalikan.",
+        max_length=128,
+        description="Saring hanya percakapan milik mahasiswa ini. Tanpa ini, "
+                    "seluruh percakapan MILIK TENANT INI dikembalikan.",
     ),
     limit: int = Query(default=50, ge=1, le=200),
+    tenant: TenantContext = Depends(tenant_conversation_read),
 ) -> ConversationListResponse:
-    ringkas = conversation_store.list_summaries(student_id=student_id, limit=limit)
+    ringkas = conversation_store.list_summaries(
+        student_id=student_id, limit=limit, tenant_id=tenant.tenant_id,
+    )
     return ConversationListResponse(
         total=len(ringkas),
         conversations=[
@@ -69,18 +81,31 @@ async def list_conversations(
 
 
 @router.get("/{conversation_id}", response_model=ConversationDetail)
-async def get_conversation(conversation_id: str) -> ConversationDetail:
+async def get_conversation(
+    request: Request,
+    conversation_id: str,
+    tenant: TenantContext = Depends(tenant_conversation_read),
+) -> ConversationDetail:
     """Isi lengkap sebuah percakapan, siap ditampilkan ulang apa adanya.
 
     Transkrip memuat langkah navigasi juga (pilihan mata kuliah, minggu, materi),
     supaya tampilannya persis seperti saat percakapan berlangsung.
+
+    Percakapan milik tenant lain dibalas 404, bukan 403. Membedakan keduanya
+    memberi tahu pemanggil bahwa sebuah `conversation_id` memang ada di sistem —
+    cukup untuk memetakan id yang valid lewat percobaan berulang.
     """
-    d = conversation_store.load(conversation_id)
+    d = conversation_store.load(conversation_id, tenant_id=tenant.tenant_id)
     if d is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Percakapan '{conversation_id}' tidak ditemukan",
+            detail="Percakapan tidak ditemukan",
         )
+    audit.record(
+        audit.CONVERSATION_READ, tenant_id=tenant.tenant_id, actor=tenant.key_id,
+        request_id=request_id(request), ip=client_ip(request),
+        detail={"conversation_id": conversation_id},
+    )
     transcript = [
         TranscriptMessage(**m) for m in (d.get("transcript") or [])
     ]
@@ -98,16 +123,28 @@ async def get_conversation(conversation_id: str) -> ConversationDetail:
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT,
                response_model=None)
-async def delete_conversation(conversation_id: str) -> None:
+async def delete_conversation(
+    request: Request,
+    conversation_id: str,
+    tenant: TenantContext = Depends(tenant_conversation_delete),
+) -> None:
     """Hapus permanen. Session di memori ikut dibuang agar tidak tertulis ulang.
 
     Tanpa membuang salinan di memori, permintaan berikutnya dengan `session_id`
     yang sama akan menyimpannya kembali ke disk — dan percakapan yang sudah
     dihapus mahasiswa muncul lagi.
+
+    Penghapusan dibatasi pada direktori tenant pemanggil, sehingga sebuah id
+    milik tenant lain hanya menghasilkan 404 — bukan menghapus data orang lain.
     """
-    session_store.drop(conversation_id)
-    if not conversation_store.delete(conversation_id):
+    session_store.drop(conversation_id, tenant_id=tenant.tenant_id)
+    if not conversation_store.delete(conversation_id, tenant_id=tenant.tenant_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Percakapan '{conversation_id}' tidak ditemukan",
+            detail="Percakapan tidak ditemukan",
         )
+    audit.record(
+        audit.CONVERSATION_DELETE, tenant_id=tenant.tenant_id, actor=tenant.key_id,
+        request_id=request_id(request), ip=client_ip(request),
+        detail={"conversation_id": conversation_id},
+    )

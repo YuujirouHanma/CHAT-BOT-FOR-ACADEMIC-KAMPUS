@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.api.auth import tenant_content_read
 from src.api.dependencies import get_pipeline
 from src.api.schemas import (
     ContentListResponse,
@@ -15,13 +16,21 @@ from src.api.schemas import (
 )
 from src.pipeline import RAGPipeline
 from src.storage.content_store import list_contents, list_files
+from src.tenancy import TenantContext
 
 router = APIRouter(prefix="/browse", tags=["browse"])
 
 
 @router.get("/contents", response_model=ContentListResponse)
-async def get_contents() -> ContentListResponse:
-    return ContentListResponse(contents=list_contents())
+async def get_contents(
+    tenant: TenantContext = Depends(tenant_content_read),
+) -> ContentListResponse:
+    """Seluruh content_id MILIK TENANT INI.
+
+    Sebelumnya endpoint ini membacakan isi direktori penyimpanan apa adanya —
+    daftar lengkap materi setiap pelanggan kepada siapa pun yang memegang kunci.
+    """
+    return ContentListResponse(contents=list_contents(tenant_id=tenant.tenant_id))
 
 
 @router.get(
@@ -31,17 +40,20 @@ async def get_contents() -> ContentListResponse:
 async def get_files(
     content_id: str,
     pipeline: RAGPipeline = Depends(get_pipeline),
+    tenant: TenantContext = Depends(tenant_content_read),
 ) -> FileListResponse:
     """List ALL files for a content_id — documents, videos, audio, etc.
     Documents get an `indexed` flag from Qdrant."""
-    fs_files = list_files(content_id)
+    fs_files = list_files(content_id, tenant_id=tenant.tenant_id)
     if not fs_files:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No files found for content '{content_id}'",
+            detail="Materi tidak ditemukan",
         )
 
-    indexed_records = await pipeline._store.list_indexed_files(content_id=content_id)
+    indexed_records = await pipeline._store.list_indexed_files(
+        content_id=content_id, tenant_id=tenant.tenant_id,
+    )
     indexed_names = {r["source_file"] for r in indexed_records}
 
     files = [

@@ -2,6 +2,15 @@
 
 Not a training pipeline — just durable records that a dosen/asisten can
 later review to validate answers and build fine-tuning datasets offline.
+
+Dipisah per tenant: `data/hitl_logs/{tenant_id}/`. Berkas ini memuat pertanyaan
+mahasiswa beserta jawaban lengkapnya — isi paling sensitif di seluruh sistem,
+karena merekam apa yang sedang dipelajari seseorang dan materi internal kampus
+mana yang dipakai menjawabnya. Menaruhnya dalam satu berkas bersama berarti
+siapa pun yang boleh membaca log satu kampus dapat membaca log kampus lain.
+
+Identitas mahasiswa disunting lebih dulu lewat `security.redact`, sehingga baris
+log tetap dapat ditelusuri dan dibandingkan tanpa memuat identitas utuhnya.
 """
 from __future__ import annotations
 
@@ -12,11 +21,18 @@ from pathlib import Path
 from typing import Any
 
 from src.config import PROJECT_ROOT
+from src.security import redact
+from src.tenancy import require_tenant_id, storage_prefix
 
 HITL_DIR = PROJECT_ROOT / "data" / "hitl_logs"
-CONVERSATION_LOG_PATH = HITL_DIR / "conversation_logs.jsonl"
-FEEDBACK_LOG_PATH = HITL_DIR / "student_feedback_logs.jsonl"
-QUIZ_ATTEMPT_LOG_PATH = HITL_DIR / "quiz_attempts.jsonl"
+
+CONVERSATION_LOG = "conversation_logs.jsonl"
+FEEDBACK_LOG = "student_feedback_logs.jsonl"
+QUIZ_ATTEMPT_LOG = "quiz_attempts.jsonl"
+
+
+def log_dir(tenant_id: str) -> Path:
+    return HITL_DIR / storage_prefix(tenant_id)
 
 
 def _json_safe(obj: Any) -> Any:
@@ -44,12 +60,16 @@ def log_interaction(
     elapsed_seconds: float,
     content_id: str | None = None,
     session_id: str | None = None,
+    *,
+    tenant_id: str,
 ) -> str:
     """Log one chat interaction. Returns the interaction_id for feedback linking."""
+    tenant_id = require_tenant_id(tenant_id, operation="log_interaction")
     interaction_id = f"hitl_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     record = {
         "interaction_id": interaction_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "tenant_id": tenant_id,
         "session_id": session_id,
         "content_id": content_id,
         "question": question,
@@ -59,7 +79,7 @@ def log_interaction(
         "recommendations": recommendations,
         "elapsed_seconds": round(elapsed_seconds, 3),
     }
-    _append_jsonl(CONVERSATION_LOG_PATH, record)
+    _append_jsonl(log_dir(tenant_id) / CONVERSATION_LOG, redact.scrub(record))
     return interaction_id
 
 
@@ -71,12 +91,16 @@ def log_quiz_attempt(
     score: float,
     session_id: str | None = None,
     student_id: str | None = None,
+    *,
+    tenant_id: str,
 ) -> str:
     """Log one quiz attempt (for progress tracking). Returns the attempt_id."""
+    tenant_id = require_tenant_id(tenant_id, operation="log_quiz_attempt")
     attempt_id = f"quiz_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
     record = {
         "attempt_id": attempt_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "tenant_id": tenant_id,
         "session_id": session_id,
         "student_id": student_id,
         "content_id": content_id,
@@ -85,7 +109,7 @@ def log_quiz_attempt(
         "total": total,
         "score": score,
     }
-    _append_jsonl(QUIZ_ATTEMPT_LOG_PATH, record)
+    _append_jsonl(log_dir(tenant_id) / QUIZ_ATTEMPT_LOG, redact.scrub(record))
     return attempt_id
 
 
@@ -94,14 +118,18 @@ def log_feedback(
     rating: str,
     issues: list[str] | None = None,
     comment: str | None = None,
+    *,
+    tenant_id: str,
 ) -> None:
     """Log student feedback for a previously logged interaction."""
+    tenant_id = require_tenant_id(tenant_id, operation="log_feedback")
     record = {
         "feedback_id": f"fb_{uuid.uuid4().hex[:8]}",
         "interaction_id": interaction_id,
+        "tenant_id": tenant_id,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
         "rating": rating,
         "issues": issues or [],
         "comment": comment or "",
     }
-    _append_jsonl(FEEDBACK_LOG_PATH, record)
+    _append_jsonl(log_dir(tenant_id) / FEEDBACK_LOG, redact.scrub(record))

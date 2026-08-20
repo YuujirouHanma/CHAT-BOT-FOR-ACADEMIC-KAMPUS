@@ -58,6 +58,13 @@ class Chunk(BaseModel):
     chunk_index: int = 0
     content_id: str | None = None
 
+    # Pemilik potongan ini. Dicap oleh pipeline saat indexing dan menjadi
+    # penyaring WAJIB pada setiap pencarian — inilah batas antar pelanggan.
+    # Boleh None di sini karena chunker membentuk potongan sebelum konteks
+    # tenant menempel; `QdrantStore.upsert_chunks` menolak yang masih kosong,
+    # sehingga tidak ada potongan tanpa pemilik yang bisa masuk ke index.
+    tenant_id: str | None = None
+
     # Catalog hierarchy (mata kuliah → minggu → materi) for the guided UI.
     course_id: str | None = None
     course_name: str | None = None

@@ -23,6 +23,7 @@ from src.ingestion.transcriber import is_media, parse_media
 from src.retrieval.hybrid_retriever import HybridRetriever
 from src.retrieval.reranker import Reranker
 from src.storage.qdrant_store import QdrantStore
+from src.tenancy import require_tenant_id
 from src.utils.logger import logger
 
 
@@ -127,8 +128,14 @@ class RAGPipeline:
         course_id: str | None = None,
         course_name: str | None = None,
         week: int | None = None,
+        *,
+        tenant_id: str,
     ) -> IndexResult:
-        logger.info("=== Indexing {} (content_id={}) ===", file_path.name, content_id)
+        tenant_id = require_tenant_id(tenant_id, operation="index_document")
+        logger.info(
+            "=== Indexing {} (tenant={}, content_id={}) ===",
+            file_path.name, tenant_id, content_id,
+        )
 
         # Video/audio go through transcription; everything else through the parser.
         if is_media(file_path):
@@ -150,6 +157,7 @@ class RAGPipeline:
         )
         chunks = [
             c.model_copy(update={
+                "tenant_id": tenant_id,
                 "course_id": r_course_id,
                 "course_name": r_course_name,
                 "week": r_week,
@@ -158,7 +166,7 @@ class RAGPipeline:
         ]
 
         embedded = await self._embedder.embed_chunks(chunks)
-        stored = await self._store.upsert_chunks(embedded)
+        stored = await self._store.upsert_chunks(embedded, tenant_id=tenant_id)
 
         logger.info("=== Done {}: {} → {} → {} ===",
                      file_path.name, len(elements), len(chunks), stored)
@@ -182,9 +190,13 @@ class RAGPipeline:
         course_id: str | None = None,
         weeks: list[int] | None = None,
         style: str | None = None,
+        *,
+        tenant_id: str,
     ) -> QueryResult:
-        logger.info("=== Query: '{}' (content_id={}, model={}, level={}) ===",
-                    question[:80], content_id, model or "default", level or "standar")
+        tenant_id = require_tenant_id(tenant_id, operation="query")
+        logger.info("=== Query: '{}' (tenant={}, content_id={}, model={}, level={}) ===",
+                    question[:80], tenant_id, content_id, model or "default",
+                    level or "standar")
         start = time.monotonic()
 
         # Stage 1: decompose the question into an enriched, more searchable query.
@@ -194,7 +206,7 @@ class RAGPipeline:
         # Stage 2: retrieve using the enriched query.
         results = await self._retriever.retrieve(
             query=enriched_query, content_id=content_id, source_filter=source_filter,
-            course_id=course_id, weeks=weeks,
+            course_id=course_id, weeks=weeks, tenant_id=tenant_id,
         )
         if not results:
             result = QueryResult(
@@ -206,7 +218,7 @@ class RAGPipeline:
             result.interaction_id = log_interaction(
                 question=question, dq=dq, answer=result.answer, sources=[],
                 recommendations=[], elapsed_seconds=time.monotonic() - start,
-                content_id=content_id, session_id=session_id,
+                content_id=content_id, session_id=session_id, tenant_id=tenant_id,
             )
             return result
 
@@ -235,7 +247,7 @@ class RAGPipeline:
         interaction_id = log_interaction(
             question=question, dq=dq, answer=answer, sources=sources,
             recommendations=recommendations, elapsed_seconds=time.monotonic() - start,
-            content_id=content_id, session_id=session_id,
+            content_id=content_id, session_id=session_id, tenant_id=tenant_id,
         )
         return QueryResult(
             answer=answer, sources=sources, recommendations=recommendations,
@@ -254,6 +266,8 @@ class RAGPipeline:
         style: str | None = None,
         awaiting: str | None = None,
         model: str | None = None,
+        tenant_id: str,
+        allowed_courses: frozenset[str] | None = None,
     ) -> GuidedTurn:
         """Satu putaran guided navigation: mata kuliah → minggu → materi → pertanyaan.
 
@@ -264,7 +278,13 @@ class RAGPipeline:
         Semua pilihan diambil dari yang benar-benar terindex, jadi mahasiswa tidak
         pernah ditawari minggu atau materi yang kosong.
         """
-        courses = await self._store.list_courses()
+        tenant_id = require_tenant_id(tenant_id, operation="guided_turn")
+        courses = await self._store.list_courses(tenant_id=tenant_id)
+        # ABAC: kunci yang dibatasi sebagian mata kuliah tidak boleh DITAWARI
+        # sisanya. Menyaring di sini, bukan hanya menolak saat dipilih, membuat
+        # chatbot tidak pernah menyebut mata kuliah yang ujungnya akan ditolak.
+        if allowed_courses is not None:
+            courses = [c for c in courses if c["course_id"] in allowed_courses]
 
         if guided.wants_reset(question):
             return await self._ask_course(courses)
@@ -282,7 +302,9 @@ class RAGPipeline:
         text_for_ctx = question
         picked: dict | None = None
         if cur_course and cur_weeks:
-            offered = await self._store.list_materials_for_weeks(cur_course, cur_weeks)
+            offered = await self._store.list_materials_for_weeks(
+                cur_course, cur_weeks, tenant_id=tenant_id,
+            )
             picked = guided.match_material(
                 question, offered,
                 allow_ordinal=(awaiting == guided.STEP_MATERIAL),
@@ -314,7 +336,9 @@ class RAGPipeline:
         # Fase 2: tetapkan materi.
         materials: list[dict] = []
         if cur_course and cur_weeks:
-            materials = await self._store.list_materials_for_weeks(cur_course, cur_weeks)
+            materials = await self._store.list_materials_for_weeks(
+                cur_course, cur_weeks, tenant_id=tenant_id,
+            )
             mat = picked or guided.match_material(
                 question, materials,
                 allow_ordinal=(awaiting == guided.STEP_MATERIAL),
@@ -353,7 +377,7 @@ class RAGPipeline:
             return await self._ask_course(courses)
 
         if step == guided.STEP_WEEK:
-            tersedia = await self._store.list_weeks(cur_course or "")
+            tersedia = await self._store.list_weeks(cur_course or "", tenant_id=tenant_id)
             if not tersedia:
                 turn = await self._ask_course(courses)
                 turn.message = guided.empty_message(
@@ -372,7 +396,9 @@ class RAGPipeline:
 
         if step == guided.STEP_MATERIAL:
             if not materials:
-                tersedia = await self._store.list_weeks(cur_course or "")
+                tersedia = await self._store.list_weeks(
+                    cur_course or "", tenant_id=tenant_id,
+                )
                 return GuidedTurn(
                     step=guided.STEP_WEEK,
                     message=guided.empty_message(
@@ -384,7 +410,9 @@ class RAGPipeline:
                     ],
                     **{**ctx, "weeks": []},
                 )
-            topik = await self.week_topic(cur_course or "", cur_weeks, model=model)
+            topik = await self.week_topic(
+                cur_course or "", cur_weeks, model=model, tenant_id=tenant_id,
+            )
             return GuidedTurn(
                 step=step,
                 message=guided.prompt_for(
@@ -423,7 +451,7 @@ class RAGPipeline:
         starters: list[str] = []
         if cur_cid and cur_sf:
             starters = await self.starter_questions(
-                cur_cid, cur_sf, model=model, style=cur_style,
+                cur_cid, cur_sf, model=model, style=cur_style, tenant_id=tenant_id,
             )
         return GuidedTurn(
             step=guided.STEP_QUESTION,
@@ -438,6 +466,7 @@ class RAGPipeline:
 
     async def week_topic(
         self, course_id: str, weeks: list[int], model: str | None = None,
+        *, tenant_id: str,
     ) -> str:
         """Satu kalimat topik yang dibahas pada minggu-minggu tertentu.
 
@@ -445,17 +474,18 @@ class RAGPipeline:
         seperti "Materi SBD TM9.pptx" tidak memberi tahu mahasiswa apa pun.
         Di-cache karena isinya hanya berubah bila materi minggu itu berubah.
         """
+        tenant_id = require_tenant_id(tenant_id, operation="week_topic")
         if not (course_id and weeks):
             return ""
         kunci = f"{course_id}::{'-'.join(str(w) for w in sorted(set(weeks)))}"
-        cached = gen_cache.load("week_topic", kunci, "topic")
+        cached = gen_cache.load("week_topic", kunci, "topic", tenant_id=tenant_id)
         if cached is not None:
             return cached[0] if isinstance(cached, list) and cached else ""
 
-        text = await self._store.get_week_text(course_id, weeks)
+        text = await self._store.get_week_text(course_id, weeks, tenant_id=tenant_id)
         topik = await self._generator.summarize_week_topic(text, model=model)
         if topik:
-            gen_cache.save("week_topic", kunci, "topic", [topik])
+            gen_cache.save("week_topic", kunci, "topic", [topik], tenant_id=tenant_id)
         return topik
 
     async def _ask_course(self, courses: list[dict]) -> GuidedTurn:
@@ -480,7 +510,7 @@ class RAGPipeline:
 
     async def starter_questions(
         self, content_id: str, source_file: str, model: str | None = None,
-        style: str | None = None,
+        style: str | None = None, *, tenant_id: str,
     ) -> list[str]:
         """Pertanyaan pembuka untuk sebuah materi, disesuaikan gaya belajar.
 
@@ -488,32 +518,39 @@ class RAGPipeline:
         hubungan) tidak cocok dipakai ulang untuk gaya "praktik" (soal cara dan
         penerapan), jadi keduanya tidak boleh berbagi kunci cache.
         """
+        tenant_id = require_tenant_id(tenant_id, operation="starter_questions")
         spec = learning_styles.resolve(style)
         kunci = f"{source_file}::{spec.key}"
-        cached = gen_cache.load("starter", content_id, kunci)
+        cached = gen_cache.load("starter", content_id, kunci, tenant_id=tenant_id)
         if cached is not None:
             return cached
 
-        text = await self._store.get_material_text(content_id, source_file)
+        text = await self._store.get_material_text(
+            content_id, source_file, tenant_id=tenant_id,
+        )
         questions = await self._generator.generate_starter_questions(
             text, model=model, style_hint=spec.starter_hint,
         )
         if questions:
-            gen_cache.save("starter", content_id, kunci, questions)
+            gen_cache.save("starter", content_id, kunci, questions, tenant_id=tenant_id)
         return questions
 
     async def quiz(
         self, content_id: str, source_file: str, model: str | None = None,
+        *, tenant_id: str,
     ) -> list[dict]:
         """Multiple-choice quiz for a material. Cached after first generation."""
-        cached = gen_cache.load("quiz", content_id, source_file)
+        tenant_id = require_tenant_id(tenant_id, operation="quiz")
+        cached = gen_cache.load("quiz", content_id, source_file, tenant_id=tenant_id)
         if cached is not None:
             return cached
 
-        text = await self._store.get_material_text(content_id, source_file)
+        text = await self._store.get_material_text(
+            content_id, source_file, tenant_id=tenant_id,
+        )
         quiz = await self._generator.generate_quiz(text, model=model)
         if quiz:
-            gen_cache.save("quiz", content_id, source_file, quiz)
+            gen_cache.save("quiz", content_id, source_file, quiz, tenant_id=tenant_id)
         return quiz
 
     async def grade_quiz(
@@ -523,13 +560,16 @@ class RAGPipeline:
         answers: list[int],
         session_id: str | None = None,
         student_id: str | None = None,
+        *,
+        tenant_id: str,
     ) -> dict:
         """Grade submitted answers against the material's quiz and log the attempt.
 
         Grades against the SAME (cached) quiz the student received. Raises
         ValueError if no quiz exists for the material.
         """
-        quiz = await self.quiz(content_id, source_file)
+        tenant_id = require_tenant_id(tenant_id, operation="grade_quiz")
+        quiz = await self.quiz(content_id, source_file, tenant_id=tenant_id)
         if not quiz:
             raise ValueError("Kuis tidak tersedia untuk materi ini")
 
@@ -554,7 +594,7 @@ class RAGPipeline:
         attempt_id = log_quiz_attempt(
             content_id=content_id, source_file=source_file,
             correct=correct, total=total, score=score,
-            session_id=session_id, student_id=student_id,
+            session_id=session_id, student_id=student_id, tenant_id=tenant_id,
         )
         return {
             "total": total,

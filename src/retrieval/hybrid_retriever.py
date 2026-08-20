@@ -20,6 +20,7 @@ from src.config import settings
 from src.indexing.embedder import Embedder
 from src.retrieval.reranker import Reranker
 from src.storage.qdrant_store import QdrantStore
+from src.tenancy import require_tenant_id
 from src.utils.logger import logger
 
 
@@ -48,6 +49,8 @@ class HybridRetriever:
         content_id: str | None = None,
         course_id: str | None = None,
         weeks: list[int] | None = None,
+        *,
+        tenant_id: str,
     ) -> list[dict]:
         """Run the full retrieval pipeline.
 
@@ -58,6 +61,11 @@ class HybridRetriever:
             rerank_top_k: Final results returned to caller. Defaults to
                 settings.rerank_top_k.
             source_filter: Optional source filename to restrict to one doc.
+            tenant_id: WAJIB. Seluruh penyaring lain di atas bersifat opsional —
+                mahasiswa yang bertanya bebas tanpa memilih materi membuat
+                semuanya `None`. Dulu keadaan itu berarti pencarian menyapu
+                seluruh koleksi; dengan `tenant_id` wajib, cakupan terluas yang
+                mungkin terjadi adalah seluruh materi milik kampus itu sendiri.
 
         Catatan: query yang sama dipakai untuk pencarian vektor DAN reranking.
         Sempat dicoba memisahkannya — reranking memakai pertanyaan asli mahasiswa
@@ -69,6 +77,7 @@ class HybridRetriever:
             List of dicts with keys: chunk_id, score (Qdrant), rerank_score,
             payload (contains text, raw_html, image_base64, metadata).
         """
+        tenant_id = require_tenant_id(tenant_id, operation="retrieve")
         cleaned_query = (query or "").strip()
         if not cleaned_query:
             raise ValueError("Empty query")
@@ -77,10 +86,11 @@ class HybridRetriever:
         rerank_top_k = rerank_top_k or settings.rerank_top_k
 
         logger.info(
-            "Retrieving for query (len={}): retrieval_top_k={}, rerank_top_k={}",
+            "Retrieving for query (len={}): retrieval_top_k={}, rerank_top_k={}, tenant={}",
             len(cleaned_query),
             retrieval_top_k,
             rerank_top_k,
+            tenant_id,
         )
 
         dense, sparse = await self._embedder.embed_query(cleaned_query)
@@ -93,6 +103,7 @@ class HybridRetriever:
             content_id=content_id,
             course_id=course_id,
             weeks=weeks,
+            tenant_id=tenant_id,
         )
         if not candidates:
             logger.warning("Vector search returned no candidates")

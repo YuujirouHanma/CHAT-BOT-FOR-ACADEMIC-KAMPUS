@@ -4,6 +4,12 @@ Session hidup di memori selama dipakai, dan setiap perubahan ditulis ke disk
 lewat `conversation_store`. Karena itu `session_id` sekaligus menjadi identitas
 percakapan yang dapat dibuka kembali berhari-hari kemudian — klien tidak perlu
 mengenal konsep kedua.
+
+Setiap session terikat pada satu tenant. `session_id` adalah UUID yang dikirim
+bolak-balik oleh klien, jadi ia harus diperlakukan sebagai nilai yang bisa
+ditebak atau dicuri: tanpa ikatan tenant, siapa pun yang memegang sebuah
+`session_id` dapat memuat percakapan itu lewat kunci API tenant mana pun. Cache
+di memori pun dikunci per tenant, bukan hanya per `session_id`.
 """
 from __future__ import annotations
 
@@ -12,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from src.storage import conversation_store
+from src.tenancy import require_tenant_id
 
 TTL_SECONDS = 3600
 
@@ -19,6 +26,9 @@ TTL_SECONDS = 3600
 @dataclass
 class Session:
     session_id: str
+    # Pemilik percakapan ini. Wajib — tanpa nilai bawaan, supaya membuat session
+    # tanpa tenant menjadi galat di titik pemanggilan, bukan kebocoran diam-diam.
+    tenant_id: str
     content_id: str | None = None
     source_filter: str | None = None
     # Konteks guided navigation (mata kuliah → minggu → materi). Disimpan terpisah
@@ -69,6 +79,7 @@ class Session:
         """Bentuk yang disimpan ke disk."""
         return {
             "conversation_id": self.session_id,
+            "tenant_id": self.tenant_id,
             "student_id": self.student_id,
             "title": self.title or "Percakapan baru",
             "created_at": self.created_at,
@@ -87,16 +98,21 @@ class Session:
         }
 
     @classmethod
-    def from_record(cls, d: dict) -> Session:
+    def from_record(cls, d: dict, *, tenant_id: str) -> Session:
         """Bangun ulang session dari berkas tersimpan.
 
         Kuis yang sedang berjalan sengaja TIDAK dipulihkan: melanjutkan kuis
         berhari-hari kemudian di tengah soal lebih membingungkan daripada
         memulainya lagi.
+
+        `tenant_id` diambil dari kredensial pemanggil, bukan dari isi berkas —
+        berkas hanya berhak menentukan isinya sendiri, tidak menentukan siapa
+        yang boleh membacanya.
         """
         ctx = d.get("context") or {}
         return cls(
             session_id=d.get("conversation_id", str(uuid.uuid4())),
+            tenant_id=require_tenant_id(tenant_id, operation="Session.from_record"),
             student_id=d.get("student_id"),
             title=d.get("title", ""),
             created_at=d.get("created_at") or conversation_store.now_iso(),
@@ -113,7 +129,7 @@ class Session:
         )
 
     def persist(self) -> None:
-        conversation_store.save(self.to_record())
+        conversation_store.save(self.to_record(), tenant_id=self.tenant_id)
 
     def start_quiz(self, questions: list[dict]) -> None:
         self.quiz = {"questions": questions, "answers": [], "index": 0}
@@ -225,46 +241,68 @@ class SessionStore:
     Kedaluwarsa di memori hanya membebaskan RAM — percakapannya tetap ada di
     disk, dan permintaan berikutnya dengan `session_id` yang sama akan
     memuatnya kembali. Itulah yang membuat riwayat dapat dibuka lagi.
+
+    Kunci cache adalah `tenant_id` + `session_id`, bukan `session_id` saja.
+    Dengan kunci tunggal, tenant B yang mengirim `session_id` milik tenant A
+    akan mendapat session itu langsung dari memori — melewati pemisahan
+    direktori di disk yang seharusnya menahannya.
     """
 
     def __init__(self) -> None:
-        self._sessions: dict[str, Session] = {}
+        self._sessions: dict[tuple[str, str], Session] = {}
 
-    def create(self, student_id: str | None = None) -> Session:
-        s = Session(session_id=str(uuid.uuid4()), student_id=student_id)
-        self._sessions[s.session_id] = s
+    def create(self, *, tenant_id: str, student_id: str | None = None) -> Session:
+        tenant_id = require_tenant_id(tenant_id, operation="SessionStore.create")
+        s = Session(
+            session_id=str(uuid.uuid4()), tenant_id=tenant_id, student_id=student_id,
+        )
+        self._sessions[(tenant_id, s.session_id)] = s
         return s
 
-    def get(self, session_id: str) -> Session | None:
+    def get(self, session_id: str, *, tenant_id: str) -> Session | None:
         """Session dari memori, atau dimuat ulang dari disk bila sudah lewat TTL."""
-        s = self._sessions.get(session_id)
+        tenant_id = require_tenant_id(tenant_id, operation="SessionStore.get")
+        kunci = (tenant_id, session_id)
+
+        s = self._sessions.get(kunci)
         if s is not None and not s.is_expired():
             s.touch()
             return s
         if s is not None:
-            del self._sessions[session_id]
+            del self._sessions[kunci]
 
-        record = conversation_store.load(session_id)
+        record = conversation_store.load(session_id, tenant_id=tenant_id)
         if record is None:
             return None
-        pulih = Session.from_record(record)
-        self._sessions[pulih.session_id] = pulih
+        pulih = Session.from_record(record, tenant_id=tenant_id)
+        self._sessions[(tenant_id, pulih.session_id)] = pulih
         return pulih
 
     def get_or_create(
-        self, session_id: str | None, student_id: str | None = None,
+        self,
+        session_id: str | None,
+        *,
+        tenant_id: str,
+        student_id: str | None = None,
     ) -> Session:
+        """Ambil session yang ada, atau buat baru.
+
+        `session_id` yang tidak dikenali menghasilkan session BARU, bukan galat:
+        dari sisi tenant lain, sebuah id milik orang lain memang tidak pernah ada.
+        Membedakan "tidak ada" dari "ada tetapi bukan milikmu" akan memberi tahu
+        penebak bahwa sebuah id itu nyata.
+        """
         if session_id:
-            s = self.get(session_id)
+            s = self.get(session_id, tenant_id=tenant_id)
             if s:
                 if student_id and not s.student_id:
                     s.student_id = student_id
                 return s
-        return self.create(student_id)
+        return self.create(tenant_id=tenant_id, student_id=student_id)
 
-    def drop(self, session_id: str) -> None:
+    def drop(self, session_id: str, *, tenant_id: str) -> None:
         """Buang dari memori. Penghapusan berkasnya urusan pemanggil."""
-        self._sessions.pop(session_id, None)
+        self._sessions.pop((tenant_id, session_id), None)
 
 
 session_store = SessionStore()

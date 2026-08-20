@@ -11,7 +11,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.schemas import Chunk, ElementType
-from src.storage.qdrant_store import QdrantStore
+from src.storage.qdrant_store import TENANT_FIELD, QdrantStore
+from tests.conftest import TEST_TENANT_ID as TENANT
 
 
 def _chunk(
@@ -127,7 +128,7 @@ class TestUpsertChunks:
     @pytest.mark.asyncio
     async def test_empty_input_returns_zero(self) -> None:
         client, store = _make_client_and_store()
-        result = await store.upsert_chunks([])
+        result = await store.upsert_chunks([], tenant_id=TENANT)
         assert result == 0
         client.upsert.assert_not_called()
 
@@ -138,13 +139,15 @@ class TestUpsertChunks:
         bad_chunk.dense_embedding = None
 
         with pytest.raises(ValueError, match="no dense embedding"):
-            await store.upsert_chunks([bad_chunk])
+            await store.upsert_chunks([bad_chunk], tenant_id=TENANT)
 
     @pytest.mark.asyncio
     async def test_single_batch_upserts_once(self) -> None:
         client, store = _make_client_and_store()
 
-        result = await store.upsert_chunks([_chunk(chunk_id="a"), _chunk(chunk_id="b")])
+        result = await store.upsert_chunks(
+            [_chunk(chunk_id="a"), _chunk(chunk_id="b")], tenant_id=TENANT,
+        )
 
         assert result == 2
         assert client.upsert.call_count == 1
@@ -155,7 +158,7 @@ class TestUpsertChunks:
         client, store = _make_client_and_store()
         chunks = [_chunk(chunk_id=f"c{i}") for i in range(65)]
 
-        result = await store.upsert_chunks(chunks)
+        result = await store.upsert_chunks(chunks, tenant_id=TENANT)
 
         assert result == 65
         assert client.upsert.call_count == 2
@@ -169,7 +172,7 @@ class TestUpsertChunks:
             raw_html="<table/>",
         )
 
-        await store.upsert_chunks([chunk])
+        await store.upsert_chunks([chunk], tenant_id=TENANT)
 
         points = client.upsert.call_args.kwargs["points"]
         payload = points[0].payload
@@ -183,7 +186,7 @@ class TestUpsertChunks:
         client, store = _make_client_and_store(enable_sparse=True)
         chunk = _chunk(chunk_id="c1", sparse={5: 0.5, 7: 0.3})
 
-        await store.upsert_chunks([chunk])
+        await store.upsert_chunks([chunk], tenant_id=TENANT)
 
         points = client.upsert.call_args.kwargs["points"]
         assert "sparse" in points[0].vector
@@ -193,7 +196,7 @@ class TestUpsertChunks:
         client, store = _make_client_and_store(enable_sparse=False)
         chunk = _chunk(chunk_id="c1", sparse={5: 0.5, 7: 0.3})
 
-        await store.upsert_chunks([chunk])
+        await store.upsert_chunks([chunk], tenant_id=TENANT)
 
         points = client.upsert.call_args.kwargs["points"]
         assert "sparse" not in points[0].vector
@@ -206,7 +209,7 @@ class TestSearch:
         client, store = _make_client_and_store()
         client.query_points.return_value = SimpleNamespace(points=[])
 
-        await store.search(dense_vector=[0.1] * 1024, sparse_vector=None, top_k=5)
+        await store.search(dense_vector=[0.1] * 1024, sparse_vector=None, top_k=5, tenant_id=TENANT)
 
         kwargs = client.query_points.call_args.kwargs
         assert "prefetch" not in kwargs or kwargs.get("prefetch") is None
@@ -221,6 +224,7 @@ class TestSearch:
             dense_vector=[0.1] * 1024,
             sparse_vector={5: 0.5},
             top_k=5,
+            tenant_id=TENANT,
         )
 
         kwargs = client.query_points.call_args.kwargs
@@ -241,7 +245,7 @@ class TestSearch:
             ]
         )
 
-        results = await store.search(dense_vector=[0.1] * 1024, top_k=5)
+        results = await store.search(dense_vector=[0.1] * 1024, top_k=5, tenant_id=TENANT)
 
         assert len(results) == 2
         assert results[0]["chunk_id"] == "c1"
@@ -257,11 +261,16 @@ class TestSearch:
             dense_vector=[0.1] * 1024,
             source_filter="specific.pdf",
             top_k=5,
+            tenant_id=TENANT,
         )
 
         kwargs = client.query_points.call_args.kwargs
         flt = kwargs.get("query_filter")
         assert flt is not None
+        kondisi = {c.key: c.match.value for c in flt.must}
+        assert kondisi["source_file"] == "specific.pdf"
+        # Penyaring tenant selalu ikut, sekalipun pemanggil hanya minta satu berkas.
+        assert kondisi[TENANT_FIELD] == TENANT
 
     @pytest.mark.asyncio
     async def test_sparse_disabled_forces_dense_even_with_sparse_vector(self) -> None:
@@ -272,6 +281,7 @@ class TestSearch:
             dense_vector=[0.1] * 1024,
             sparse_vector={5: 0.5},
             top_k=5,
+            tenant_id=TENANT,
         )
 
         kwargs = client.query_points.call_args.kwargs
@@ -294,6 +304,7 @@ class TestSearch:
 
         results = await store.search(
             dense_vector=[0.1] * 1024, sparse_vector={5: 0.5}, top_k=5,
+            tenant_id=TENANT,
         )
 
         assert client.query_points.call_count == 2
@@ -324,7 +335,7 @@ class TestCatalogAggregation:
             None,
         )
 
-        courses = await store.list_courses()
+        courses = await store.list_courses(tenant_id=TENANT)
 
         assert courses == [
             {"course_id": "kka", "course_name": "KKA"},
@@ -344,7 +355,7 @@ class TestCatalogAggregation:
             None,
         )
 
-        courses = await store.list_courses()
+        courses = await store.list_courses(tenant_id=TENANT)
 
         assert courses == [{"course_id": "sbd", "course_name": "Sistem Basis Data"}]
 
@@ -356,7 +367,7 @@ class TestCatalogAggregation:
             None,
         )
 
-        weeks = await store.list_weeks("sbd")
+        weeks = await store.list_weeks("sbd", tenant_id=TENANT)
 
         assert weeks == [1, 3]
         # filter applied on course_id
@@ -374,7 +385,7 @@ class TestCatalogAggregation:
             None,
         )
 
-        materials = await store.list_materials("sbd", 1)
+        materials = await store.list_materials("sbd", 1, tenant_id=TENANT)
 
         assert materials == [
             {"source_file": "a.pdf", "content_id": "sbd-minggu-1"},
@@ -392,7 +403,9 @@ class TestCatalogAggregation:
             None,
         )
 
-        text = await store.get_material_text("sbd-minggu-1", "a.pdf", max_chars=1000)
+        text = await store.get_material_text(
+            "sbd-minggu-1", "a.pdf", max_chars=1000, tenant_id=TENANT,
+        )
 
         assert text.startswith("first")
         assert "second" in text
@@ -402,7 +415,7 @@ class TestDeleteBySource:
     @pytest.mark.asyncio
     async def test_calls_delete_with_filter(self) -> None:
         client, store = _make_client_and_store()
-        await store.delete_by_source("old_doc.pdf")
+        await store.delete_by_source("old_doc.pdf", tenant_id=TENANT)
         client.delete.assert_called_once()
         kwargs = client.delete.call_args.kwargs
         assert kwargs["collection_name"] == "test_collection"
@@ -410,10 +423,13 @@ class TestDeleteBySource:
     @pytest.mark.asyncio
     async def test_filter_matches_source_file_value(self) -> None:
         client, store = _make_client_and_store()
-        await store.delete_by_source("old_doc.pdf")
+        await store.delete_by_source("old_doc.pdf", tenant_id=TENANT)
 
         kwargs = client.delete.call_args.kwargs
         selector = kwargs["points_selector"]
-        condition = selector.filter.must[0]
-        assert condition.key == "source_file"
-        assert condition.match.value == "old_doc.pdf"
+        # Kondisi pertama kini selalu `tenant_id`; penyaring berkasnya menyusul.
+        kondisi = {c.key: c.match.value for c in selector.filter.must}
+        assert kondisi["source_file"] == "old_doc.pdf"
+        # Tanpa kondisi tenant, dua pelanggan dengan nama berkas sama akan
+        # saling menghapus materi.
+        assert kondisi[TENANT_FIELD] == TENANT

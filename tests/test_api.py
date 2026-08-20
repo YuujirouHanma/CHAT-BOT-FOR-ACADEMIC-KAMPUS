@@ -12,11 +12,11 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api.auth import verify_api_key
 from src.api.dependencies import get_pipeline
 from src.api.main import app
 from src.guided import Choice
 from src.pipeline import GuidedTurn, IndexResult, QueryResult
+from src.tenancy import TenantContext
 
 
 class _TestClient(TestClient):
@@ -69,12 +69,17 @@ def _make_pipeline_mock() -> AsyncMock:
 
 
 @pytest.fixture
-def client() -> Generator[_TestClient, None, None]:
+def client(override_tenant: TenantContext) -> Generator[_TestClient, None, None]:
     """TestClient without 'with' so lifespan (which connects to Qdrant) is skipped.
-    The pipeline is provided via dependency_overrides instead."""
+    The pipeline is provided via dependency_overrides instead.
+
+    Autentikasi diganti satu tenant tetap lewat `override_tenant`
+    (tests/conftest.py). Rute di bawah menuntut hak yang berbeda-beda —
+    `chat:ask`, `content:write`, `catalog:read` — jadi SELURUH dependency hak
+    akses ditimpa, bukan hanya gerbang `require_tenant`-nya.
+    """
     mock_pipeline = _make_pipeline_mock()
     app.dependency_overrides[get_pipeline] = lambda: mock_pipeline
-    app.dependency_overrides[verify_api_key] = lambda: None
     c = _TestClient(app)
     c.mock_pipeline = mock_pipeline
     yield c
@@ -106,14 +111,26 @@ class TestUploadEndpoint:
         response = client.post("/documents/upload")
         assert response.status_code == 422
 
-    def test_upload_propagates_indexing_error(self, client: TestClient) -> None:
+    def test_upload_indexing_error_returns_generic_500(
+        self, client: TestClient
+    ) -> None:
+        """Gagal indexing tetap 500 — tetapi sebabnya tidak ikut keluar.
+
+        Dulu pesan galat asli dipantulkan apa adanya. Pesan pustaka kerap memuat
+        path berkas di server dan versi komponen, jadi kini hanya kode galat dan
+        `request_id` yang dikirim; rinciannya tinggal di log server.
+        """
         client.mock_pipeline.index_document = AsyncMock(  # type: ignore[attr-defined]
             side_effect=RuntimeError("indexing crashed")
         )
         files = {"file": ("doc.pdf", BytesIO(b"x"), "application/pdf")}
         response = client.post("/documents/upload", files=files)
         assert response.status_code == 500
-        assert "indexing crashed" in response.json()["detail"]
+        assert "indexing crashed" not in response.text
+        body = response.json()
+        assert body["error"] == "galat_internal"
+        assert body["detail"] == "Terjadi galat internal"
+        assert body["request_id"]
 
 
 class TestChatEndpoint:
@@ -147,13 +164,21 @@ class TestChatEndpoint:
         call_kwargs = client.mock_pipeline.query.call_args.kwargs  # type: ignore[attr-defined]
         assert call_kwargs["source_filter"] == "specific.pdf"
 
-    def test_ask_propagates_query_error(self, client: TestClient) -> None:
+    def test_ask_query_error_returns_generic_500(self, client: TestClient) -> None:
+        """Kegagalan retrieval dibalas 500 tanpa menyebut sebabnya.
+
+        Rincian galat pencarian bisa memuat potongan kueri beserta datanya —
+        peta gratis bagi siapa pun yang sedang menjajaki sistem ini.
+        """
         client.mock_pipeline.query = AsyncMock(  # type: ignore[attr-defined]
             side_effect=RuntimeError("retrieval failed")
         )
         response = client.post("/chat/ask", json={"question": "q"})
         assert response.status_code == 500
-        assert "retrieval failed" in response.json()["detail"]
+        assert "retrieval failed" not in response.text
+        body = response.json()
+        assert body["error"] == "galat_internal"
+        assert body["detail"] == "Terjadi galat internal"
 
     def test_question_too_long_returns_422(self, client: TestClient) -> None:
         response = client.post(

@@ -1,17 +1,45 @@
-"""API request and response schemas."""
+"""API request and response schemas.
+
+Validasi di sini adalah ambang pertama sistem: seluruh masukan dari luar
+dianggap tidak tepercaya sampai lolos skema. Pola (`pattern`) dipakai — bukan
+sekadar panjang maksimum — pada field yang nilainya akan menjadi bagian dari
+nama berkas atau filter penyimpanan, sehingga bentuk yang berbahaya ditolak di
+ambang, jauh sebelum menyentuh disk atau Qdrant.
+"""
 from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+# --- pola bersama ---
+# Identitas yang ikut menjadi nama berkas / kunci filter: tanpa garis miring,
+# tanpa titik ganda, tanpa spasi.
+_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
+# Nama berkas materi. Titik diizinkan (ekstensi), tetapi pemisah path tidak.
+_FILENAME_PATTERN = r"^[^/\\\x00]{1,255}$"
+_TENANT_PATTERN = r"^[a-z0-9][a-z0-9_-]{1,62}$"
+
+
+class TenantScopedRequest(BaseModel):
+    """Body yang boleh menyertakan `tenant_id` untuk dicocokkan.
+
+    PENTING bagi tim pemanggil: field ini TIDAK menentukan data siapa yang
+    diakses. Cakupan selalu diturunkan dari kunci API. Nilai di sini hanya
+    dicocokkan, dan ketidakcocokan ditolak dengan 403 — gunanya menangkap kunci
+    yang tertukar di sisi klien sedini mungkin, bukan memilih tenant.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str | None = Field(default=None, pattern=_TENANT_PATTERN)
 
 
 # --- Chat ---
-class QueryRequest(BaseModel):
+class QueryRequest(TenantScopedRequest):
     question: str = Field(min_length=1, max_length=2000)
-    session_id: str | None = None
-    content_id: str | None = None
-    source_filter: str | None = Field(default=None, max_length=255)
+    session_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    content_id: str | None = Field(default=None, pattern=_ID_PATTERN)
+    source_filter: str | None = Field(default=None, max_length=255, pattern=_FILENAME_PATTERN)
     model: str | None = Field(default=None, max_length=64)  # registry key; None = default
     level: Literal["sederhana", "standar", "detail"] | None = None  # kedalaman jawaban
     # Gaya belajar: mengganti system prompt (CARA menjawab) dan alat yang
@@ -23,10 +51,11 @@ class QueryRequest(BaseModel):
     guided: bool = True
     # Diisi klien saat mahasiswa mengklik tombol pilihan. Opsional — mengirim
     # label tombol sebagai `question` biasa juga sudah dikenali.
-    course_id: str | None = Field(default=None, max_length=128)
+    course_id: str | None = Field(default=None, pattern=_ID_PATTERN)
     week: int | None = Field(default=None, ge=1, le=52)
     # Identitas mahasiswa dari aplikasi pemanggil. Dipakai menyaring daftar
-    # riwayat percakapan miliknya sendiri.
+    # riwayat percakapan miliknya sendiri. Data pribadi — disimpan dalam bentuk
+    # tersandi, tidak pernah apa adanya (lihat src/security/crypto.py).
     student_id: str | None = Field(default=None, max_length=128)
     # Beberapa minggu sekaligus, mis. saat mahasiswa menyiapkan ujian. Bila diisi,
     # nilainya menang atas `week`. `week` dipertahankan agar klien lama tetap jalan.
@@ -94,10 +123,10 @@ class QueryResponse(BaseModel):
     context: ChatContext = Field(default_factory=ChatContext)
 
 
-class FeedbackRequest(BaseModel):
-    interaction_id: str
+class FeedbackRequest(TenantScopedRequest):
+    interaction_id: str = Field(max_length=128, pattern=_ID_PATTERN)
     rating: Literal["membantu", "cukup", "tidak_membantu"]
-    issues: list[str] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list, max_length=20)
     comment: str | None = Field(default=None, max_length=1000)
 
 
@@ -134,8 +163,8 @@ class FileListResponse(BaseModel):
 
 
 # --- Batch ---
-class BatchIndexRequest(BaseModel):
-    content_id: str
+class BatchIndexRequest(TenantScopedRequest):
+    content_id: str = Field(pattern=_ID_PATTERN)
 
 
 class BatchFileResult(BaseModel):
@@ -200,10 +229,13 @@ class QuizResponse(BaseModel):
     questions: list[QuizQuestion]
 
 
-class QuizSubmitRequest(BaseModel):
-    answers: list[int] = Field(description="Indeks opsi yang dipilih per soal (urut sesuai soal)")
-    session_id: str | None = None
-    student_id: str | None = None
+class QuizSubmitRequest(TenantScopedRequest):
+    answers: list[int] = Field(
+        max_length=100,
+        description="Indeks opsi yang dipilih per soal (urut sesuai soal)",
+    )
+    session_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    student_id: str | None = Field(default=None, max_length=128)
 
 
 class QuizResultItem(BaseModel):

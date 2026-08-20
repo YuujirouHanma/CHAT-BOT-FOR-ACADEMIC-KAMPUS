@@ -15,6 +15,19 @@ Dua daftar pesan disimpan terpisah dan sengaja berbeda isinya:
 - `history`    — hanya tanya-jawab sungguhan. Dipakai sebagai konteks LLM;
   memasukkan klik menu ke sini hanya memboroskan token dan mengaburkan alur
   belajar yang ingin disambung oleh pertanyaan lanjutan.
+
+ISOLASI DAN DATA PRIBADI
+------------------------
+Berkas dipisah per tenant: `data/conversations/{tenant_id}/{id}.json`. Karena
+`tenant_id` menjadi bagian dari path, membaca percakapan tenant lain tidak
+tertahan oleh sebuah pemeriksaan yang bisa terlupa — path-nya memang tidak
+menunjuk ke sana. Nilai `tenant_id` di dalam berkas diperiksa ulang sebagai
+lapis kedua, untuk menangkap berkas yang salah tempat akibat pemulihan cadangan.
+
+`student_id` adalah data pribadi: ia merangkai seluruh riwayat belajar satu
+orang. Ia tidak disimpan apa adanya, melainkan sebagai dua turunan —
+`student_ref` (indeks buta, untuk menyaring) dan `student_id` tersandi (untuk
+ditampilkan kembali). Lihat `src/security/crypto.py`.
 """
 from __future__ import annotations
 
@@ -25,6 +38,8 @@ from pathlib import Path
 from typing import Any
 
 from src.config import PROJECT_ROOT
+from src.security import crypto
+from src.tenancy import require_tenant_id, storage_prefix
 from src.utils.logger import logger
 
 CONVERSATION_DIR = PROJECT_ROOT / "data" / "conversations"
@@ -40,11 +55,15 @@ def is_valid_id(conversation_id: str) -> bool:
     return bool(_ID_RE.match(conversation_id or ""))
 
 
-def _path_for(conversation_id: str) -> Path | None:
+def tenant_dir(tenant_id: str) -> Path:
+    return CONVERSATION_DIR / storage_prefix(tenant_id)
+
+
+def _path_for(conversation_id: str, tenant_id: str) -> Path | None:
     if not is_valid_id(conversation_id):
         logger.warning("Id percakapan ditolak: {!r}", conversation_id)
         return None
-    return CONVERSATION_DIR / f"{conversation_id}.json"
+    return tenant_dir(tenant_id) / f"{conversation_id}.json"
 
 
 def make_title(text: str) -> str:
@@ -59,47 +78,78 @@ def make_title(text: str) -> str:
     return bersih[:_TITLE_MAX].rstrip() + "…"
 
 
-def save(record: dict[str, Any]) -> None:
+def _protect_pii(record: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    """Ganti `student_id` mentah dengan bentuk tersandi + indeks butanya."""
+    hasil = dict(record)
+    mentah = hasil.get("student_id")
+    hasil["student_ref"] = crypto.blind_index(mentah, tenant_id=tenant_id)
+    hasil["student_id"] = crypto.encrypt_field(mentah, aad=tenant_id)
+    return hasil
+
+
+def _reveal_pii(record: dict[str, Any], tenant_id: str) -> dict[str, Any]:
+    hasil = dict(record)
+    hasil["student_id"] = crypto.decrypt_field(hasil.get("student_id"), aad=tenant_id)
+    return hasil
+
+
+def save(record: dict[str, Any], *, tenant_id: str) -> None:
     """Tulis satu percakapan. Kegagalan dicatat, tidak dilempar.
 
     Menyimpan riwayat tidak boleh menggagalkan jawaban yang sudah berhasil
     dihasilkan — dari sudut pandang mahasiswa, kehilangan riwayat jauh lebih
     ringan daripada kehilangan jawabannya.
     """
-    path = _path_for(record.get("conversation_id", ""))
+    tenant_id = require_tenant_id(tenant_id, operation="conversation.save")
+    path = _path_for(record.get("conversation_id", ""), tenant_id)
     if path is None:
         return
     try:
+        isi = _protect_pii(record, tenant_id)
+        isi["tenant_id"] = tenant_id
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".json.tmp")
         tmp.write_text(
-            json.dumps(record, ensure_ascii=False, indent=1), encoding="utf-8",
+            json.dumps(isi, ensure_ascii=False, indent=1), encoding="utf-8",
         )
         tmp.replace(path)   # atomik: berkas tidak pernah terbaca separuh tertulis
     except Exception as exc:
         logger.warning("Gagal menyimpan percakapan {}: {}", path.name, exc)
 
 
-def load(conversation_id: str) -> dict[str, Any] | None:
-    """Baca satu percakapan; None bila tidak ada atau rusak."""
-    path = _path_for(conversation_id)
+def load(conversation_id: str, *, tenant_id: str) -> dict[str, Any] | None:
+    """Baca satu percakapan milik tenant ini; None bila tidak ada atau rusak."""
+    tenant_id = require_tenant_id(tenant_id, operation="conversation.load")
+    path = _path_for(conversation_id, tenant_id)
     if path is None or not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        d = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Percakapan {} tidak terbaca: {}", path.name, exc)
         return None
 
+    # Lapis kedua: berkas yang tersalin ke direktori tenant lain (mis. akibat
+    # pemulihan cadangan yang keliru) ditolak, bukan disajikan.
+    pemilik = d.get("tenant_id")
+    if pemilik is not None and pemilik != tenant_id:
+        logger.error(
+            "Percakapan {} berisi tenant_id '{}' di direktori '{}' — ditolak",
+            conversation_id, pemilik, tenant_id,
+        )
+        return None
+    return _reveal_pii(d, tenant_id)
 
-def delete(conversation_id: str) -> bool:
+
+def delete(conversation_id: str, *, tenant_id: str) -> bool:
     """Hapus satu percakapan. True bila berkasnya memang ada dan terhapus."""
-    path = _path_for(conversation_id)
+    tenant_id = require_tenant_id(tenant_id, operation="conversation.delete")
+    path = _path_for(conversation_id, tenant_id)
     if path is None or not path.exists():
         return False
     try:
         path.unlink()
-        logger.info("Percakapan dihapus: {}", conversation_id)
+        logger.info("Percakapan dihapus: {} (tenant={})", conversation_id, tenant_id)
         return True
     except Exception as exc:
         logger.warning("Gagal menghapus percakapan {}: {}", conversation_id, exc)
@@ -107,31 +157,38 @@ def delete(conversation_id: str) -> bool:
 
 
 def list_summaries(
-    student_id: str | None = None, limit: int = 50,
+    student_id: str | None = None, limit: int = 50, *, tenant_id: str,
 ) -> list[dict[str, Any]]:
-    """Ringkasan percakapan, terbaru lebih dulu.
+    """Ringkasan percakapan milik satu tenant, terbaru lebih dulu.
 
     Hanya bagian ringkasnya yang dikembalikan — daftar riwayat tidak perlu
     memuat seluruh isi pesan, dan mengirimkannya akan memberatkan klien.
 
-    `student_id` menyaring milik siapa. Percakapan tanpa pemilik (mahasiswa
-    belum dikenali) hanya muncul bila penyaring tidak diisi.
+    `student_id` menyaring milik siapa, dicocokkan lewat indeks buta sehingga
+    penyaringan berjalan tanpa perlu mendekripsi satu berkas pun. Percakapan
+    tanpa pemilik (mahasiswa belum dikenali) hanya muncul bila penyaring kosong.
     """
-    if not CONVERSATION_DIR.exists():
+    tenant_id = require_tenant_id(tenant_id, operation="conversation.list")
+    root = tenant_dir(tenant_id)
+    if not root.exists():
         return []
 
+    rujukan = crypto.blind_index(student_id, tenant_id=tenant_id) if student_id else None
+
     hasil: list[dict[str, Any]] = []
-    for path in CONVERSATION_DIR.glob("*.json"):
+    for path in root.glob("*.json"):
         try:
             d = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             continue                      # berkas rusak dilewati, bukan menggagalkan daftar
-        if student_id is not None and d.get("student_id") != student_id:
+        if d.get("tenant_id") not in (None, tenant_id):
+            continue
+        if rujukan is not None and d.get("student_ref") != rujukan:
             continue
         hasil.append({
             "conversation_id": d.get("conversation_id", path.stem),
             "title": d.get("title") or "Percakapan baru",
-            "student_id": d.get("student_id"),
+            "student_id": crypto.decrypt_field(d.get("student_id"), aad=tenant_id),
             "created_at": d.get("created_at"),
             "updated_at": d.get("updated_at"),
             "message_count": len(d.get("transcript") or []),
@@ -140,6 +197,23 @@ def list_summaries(
 
     hasil.sort(key=lambda r: r.get("updated_at") or "", reverse=True)
     return hasil[:limit]
+
+
+def delete_all_for_tenant(*, tenant_id: str) -> int:
+    """Hapus seluruh percakapan satu tenant. Dipakai saat berhenti berlangganan."""
+    tenant_id = require_tenant_id(tenant_id, operation="conversation.purge")
+    root = tenant_dir(tenant_id)
+    if not root.exists():
+        return 0
+    jumlah = 0
+    for path in root.glob("*.json"):
+        try:
+            path.unlink()
+            jumlah += 1
+        except OSError as exc:
+            logger.warning("Gagal menghapus {}: {}", path.name, exc)
+    logger.warning("{} percakapan tenant '{}' dihapus", jumlah, tenant_id)
+    return jumlah
 
 
 def now_iso() -> str:

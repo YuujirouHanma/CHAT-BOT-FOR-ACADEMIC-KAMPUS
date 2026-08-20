@@ -15,9 +15,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src import guided, learning_styles
+from src.api.auth import assert_body_tenant, client_ip, request_id, tenant_chat
 from src.api.dependencies import get_pipeline
 from src.api.schemas import (
     Attachment,
@@ -32,6 +33,8 @@ from src.api.session import Session, session_store
 from src.generation.notebook import build_notebook, safe_filename
 from src.hitl.logger import log_feedback
 from src.pipeline import RAGPipeline
+from src.security import audit
+from src.tenancy import TenantContext
 from src.utils.logger import logger
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -82,7 +85,7 @@ def _choices_reply(
 
 
 async def _handle_quiz(
-    body: QueryRequest, session: Session, pipeline: RAGPipeline,
+    body: QueryRequest, session: Session, pipeline: RAGPipeline, tenant_id: str,
 ) -> QueryResponse | None:
     """Jalankan kuis di dalam percakapan; None kalau pesan ini bukan urusan kuis.
 
@@ -138,7 +141,7 @@ async def _handle_quiz(
         try:
             hasil = await pipeline.grade_quiz(
                 session.content_id or "", session.source_filter or "", jawaban,
-                session_id=session.session_id,
+                session_id=session.session_id, tenant_id=tenant_id,
             )
         except ValueError as exc:
             raise HTTPException(
@@ -158,7 +161,9 @@ async def _handle_quiz(
     if not (session.content_id and session.source_filter):
         return None  # belum pilih materi → biarkan alur guided menuntun dulu
 
-    soal = await pipeline.quiz(session.content_id, session.source_filter, model=body.model)
+    soal = await pipeline.quiz(
+        session.content_id, session.source_filter, model=body.model, tenant_id=tenant_id,
+    )
     if not soal:
         return _choices_reply(
             session,
@@ -180,10 +185,21 @@ async def _handle_quiz(
 
 @router.post("/ask", response_model=QueryResponse)
 async def ask_question(
+    request: Request,
     body: QueryRequest,
     pipeline: RAGPipeline = Depends(get_pipeline),
+    tenant: TenantContext = Depends(tenant_chat),
 ) -> QueryResponse:
-    session = session_store.get_or_create(body.session_id, body.student_id)
+    rid = request_id(request)
+    assert_body_tenant(tenant, body.tenant_id, request_id_=rid)
+    # ABAC: kunci yang dibatasi pada sebagian mata kuliah tidak boleh memakai
+    # kunci lain lewat parameter permintaan.
+    if body.course_id:
+        tenant.require_course(body.course_id)
+
+    session = session_store.get_or_create(
+        body.session_id, tenant_id=tenant.tenant_id, student_id=body.student_id,
+    )
     session.record("user", body.question)
 
     # Konteks yang dikirim eksplisit oleh klien menang atas hasil resolusi teks.
@@ -202,7 +218,7 @@ async def ask_question(
     if body.guided:
         # Kuis mendahului navigasi: selama kuis berjalan, pesan mahasiswa adalah
         # jawaban soal — bukan pertanyaan maupun perintah pindah materi.
-        quiz_reply = await _handle_quiz(body, session, pipeline)
+        quiz_reply = await _handle_quiz(body, session, pipeline, tenant.tenant_id)
         if quiz_reply is not None:
             return quiz_reply
 
@@ -216,6 +232,8 @@ async def ask_question(
             style=session.style,
             awaiting=session.awaiting,
             model=body.model,
+            tenant_id=tenant.tenant_id,
+            allowed_courses=tenant.allowed_courses,
         )
         # Hasil resolusi guided adalah sumber kebenaran konteks — dipakai apa
         # adanya, termasuk saat mengosongkan (mis. mahasiswa minta ganti materi).
@@ -251,10 +269,23 @@ async def ask_question(
         session.awaiting = None
 
     logger.info(
-        "Chat | session={} course={} minggu={} content_id={} source={}",
-        session.session_id[:8], session.course_id, session.weeks,
+        "Chat | tenant={} session={} course={} minggu={} content_id={} source={}",
+        tenant.tenant_id, session.session_id[:8], session.course_id, session.weeks,
         session.content_id, session.source_filter,
     )
+    audit.record(
+        audit.CHAT_ASK, tenant_id=tenant.tenant_id, actor=tenant.key_id,
+        request_id=rid, ip=client_ip(request),
+        detail={"course_id": session.course_id, "content_id": session.content_id},
+    )
+
+    # ABAC ditegakkan pada cakupan pencarian yang SEBENARNYA, bukan hanya pada
+    # `course_id` yang kebetulan dikirim di body. Permintaan yang tidak
+    # menentukan mata kuliah menyapu SELURUH materi tenant — lebih luas daripada
+    # jatah kunci yang dibatasi, jadi harus berhenti di sini. Memeriksa hanya
+    # ketika klien mengirim `course_id` justru membuat pembatasan itu dapat
+    # dilewati hanya dengan tidak mengirimkannya.
+    tenant.require_course(session.course_id)
 
     try:
         result = await pipeline.query(
@@ -272,13 +303,19 @@ async def ask_question(
             course_id=session.course_id if not session.content_id else None,
             weeks=list(session.weeks) if not session.content_id else None,
             style=session.style,
+            tenant_id=tenant.tenant_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception:
+        # Rincian galat tetap di log server. Membalikkannya ke klien akan
+        # membocorkan nama pustaka, path berkas, dan kadang potongan kueri —
+        # peta gratis bagi siapa pun yang sedang menjajaki sistem ini.
         logger.exception("Query failed")
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"Query failed: {exc}") from exc
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Gagal memproses pertanyaan",
+        ) from None
 
     session.add_turn("user", body.question)
     session.add_turn("assistant", result.answer)
@@ -318,10 +355,16 @@ async def ask_question(
 
 
 @router.post("/feedback", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
-async def submit_feedback(body: FeedbackRequest) -> None:
+async def submit_feedback(
+    request: Request,
+    body: FeedbackRequest,
+    tenant: TenantContext = Depends(tenant_chat),
+) -> None:
+    assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
     log_feedback(
         interaction_id=body.interaction_id,
         rating=body.rating,
         issues=body.issues,
         comment=body.comment,
+        tenant_id=tenant.tenant_id,
     )
