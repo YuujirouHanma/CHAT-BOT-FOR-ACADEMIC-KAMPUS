@@ -2,8 +2,159 @@
 
 **Untuk:** tim Back-End / Front-End yang memanggil layanan RAGAcademic
 **Sejak:** integrasi awal 1 Juli 2026 (`API_INTEGRATION.md` versi pertama)
-**Per:** 6 Agustus 2026 — layanan versi 0.3.0
-**Kontrak terbaru:** `docs/api/openapi.json` (sudah diperbarui, 17 endpoint)
+**Per:** 20 Agustus 2026 — layanan versi 0.4.0 (**multi-tenant**)
+**Kontrak terbaru:** `docs/api/openapi.json`
+**Rincian keamanan:** `docs/SECURITY.md`
+
+---
+
+## 🔴 0. VERSI 0.4.0 — MULTI-TENANT (perubahan yang memutus kompatibilitas)
+
+Layanan ini sekarang melayani **banyak kampus dalam satu deployment**. Sampai
+versi 0.3.0, seluruh data — katalog, hasil pencarian, riwayat percakapan —
+berada dalam satu ruang bersama tanpa pemisah. Begitu ada kampus kedua, itu
+berarti kebocoran data. Versi 0.4.0 memisahkannya.
+
+### Yang WAJIB dikerjakan tim BE
+
+| # | Tindakan | Akibat bila tidak |
+|---|---|---|
+| **1** | Ganti `X-API-Key` dengan **kunci per tenant** yang baru | Seluruh permintaan dibalas `401` di produksi |
+| **2** | Tangani `429` beserta header `Retry-After` | Permintaan gagal diam-diam saat kuota terlampaui |
+| **3** | Jangan kirim field yang tidak ada di kontrak | Dibalas `422` — skema kini menolak field asing |
+| **4** | Sesuaikan pembacaan body galat (bentuknya berubah) | Penanganan galat membaca field yang sudah tidak ada |
+
+### 1 — Kunci API per tenant
+
+Bentuk kunci baru:
+
+```
+ragk_<16 hex>.<rahasia>
+```
+
+Dikirim sama seperti sebelumnya, lewat header `X-API-Key`. Bedanya, **kunci itu
+sendiri yang menentukan data siapa yang kalian akses.**
+
+```http
+POST /chat/ask
+X-API-Key: ragk_3f2a91c07be4d5a8.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Kunci diterbitkan oleh tim AI per kampus, dan bisa berbeda per peruntukan:
+
+- kunci **sistem akademik** — boleh mengunggah & mengindeks materi
+- kunci **aplikasi mahasiswa** — hanya boleh bertanya & membaca katalog
+
+Kalau memakai kunci baca-saja untuk mengunggah, balasannya `403`. Minta kunci
+yang sesuai, bukan menaikkan hak kunci yang sudah ada.
+
+**Kunci lama (`RAGACADEMIC_API_KEY`) masih berjalan di lingkungan pengembangan**
+supaya integrasi kalian tidak putus hari ini. Di produksi kunci itu ditolak, dan
+server bahkan menolak menyala kalau kunci itu masih terpasang — karena satu
+kunci untuk semua pelanggan tidak dapat membedakan siapa pun.
+
+### 2 — `tenant_id` di body: opsional, dan BUKAN penentu akses
+
+Seluruh body permintaan boleh menyertakan `tenant_id`:
+
+```json
+{ "question": "apa itu normalisasi", "tenant_id": "kampus-a" }
+```
+
+**Penting — ini sering disalahpahami:** field itu **tidak menentukan** data siapa
+yang diakses. Cakupan data selalu diturunkan dari kunci API. Nilai di body hanya
+**dicocokkan**, dan kalau berbeda permintaan ditolak `403`.
+
+Gunanya menangkap kunci yang tertukar di sisi kalian sedini mungkin. Kalau body
+dipercaya sebagai penentu, siapa pun cukup menulis `tenant_id` milik kampus lain
+untuk membaca seluruh datanya — dan tidak ada lapisan lain yang akan menahannya.
+
+Field ini boleh tidak dikirim sama sekali.
+
+### 3 — Skema menolak field asing
+
+Semua body permintaan sekarang memakai `extra="forbid"`. Field yang tidak ada di
+kontrak menghasilkan `422`, bukan diabaikan diam-diam. Beberapa field juga kini
+dibatasi pola: `content_id`, `course_id`, `session_id`, `interaction_id` tidak
+boleh memuat `/`, `\`, spasi, atau `..`.
+
+### 4 — Bentuk balasan galat berubah
+
+Sebelumnya: `{"detail": "..."}`. Sekarang seragam untuk semua galat:
+
+```json
+{
+  "error": "tidak_ditemukan",
+  "detail": "Percakapan tidak ditemukan",
+  "request_id": "a1b2c3d4e5f6"
+}
+```
+
+Kode `error` yang stabil: `permintaan_tidak_valid`, `tidak_terautentikasi`,
+`akses_ditolak`, `tidak_ditemukan`, `terlalu_banyak_permintaan`,
+`muatan_terlalu_besar`, `galat_internal`.
+
+**Pakai `error`, bukan teks `detail`, untuk logika program** — teks `detail`
+sengaja dibuat tidak informatif dan bisa berubah.
+
+`request_id` juga dikirim sebagai header `X-Request-ID` pada setiap balasan.
+Simpan di log kalian: kalau ada masalah, satu kode itu cukup bagi kami untuk
+menemukan barisnya tanpa perlu kalian mengirim rincian apa pun.
+
+Dua perubahan turunan yang perlu diketahui:
+
+- **Galat 500 tidak lagi memuat pesan aslinya.** Dulu `detail` berisi galat
+  Python apa adanya — itu membocorkan path berkas dan versi pustaka kami.
+- **Percakapan milik tenant lain dibalas `404`, bukan `403`.** Disengaja:
+  membedakan keduanya akan memberi tahu bahwa sebuah id memang ada.
+
+### 5 — Kuota dan pembatasan laju
+
+Setiap tenant punya kuota (bawaan 60 permintaan/menit, 5.000/hari; dapat diatur
+per pelanggan). Melampauinya menghasilkan:
+
+```http
+HTTP/1.1 429 Too Many Requests
+Retry-After: 12
+```
+
+**Hormati `Retry-After`.** Mencoba ulang seketika hanya memperpanjang penolakan.
+Selain kuota tenant, ada juga batas per alamat IP dan per kunci — sehingga satu
+integrasi yang salah membuat perulangan tidak menghabiskan jatah kampus lain.
+
+Kunci yang salah berulang kali membuat alamat IP kalian diperlambat secara
+progresif. Kalau integrasi tiba-tiba lambat setelah salah pasang kunci, tunggu
+sebentar — bukan menambah percobaan.
+
+### 6 — `student_id` kini diperlakukan sebagai data pribadi
+
+Tidak ada perubahan kontrak: kirim seperti biasa, terbaca kembali seperti biasa.
+Yang berubah ada di sisi kami — ia disimpan dalam bentuk tersandi, dan
+penyaringan riwayat berjalan lewat indeks satu arah.
+
+Konsekuensi bagi kalian: **`student_id` yang sama di dua kampus adalah dua orang
+berbeda**, dan memang diperlakukan begitu. Jadi NIM yang kebetulan bertabrakan
+antar kampus tidak akan mempertemukan riwayat keduanya.
+
+### 7 — Perubahan lain-lain
+
+- `/health` hanya membalas `{"status": "ok"}`. Field `version` dan `llm` dihapus —
+  menyebut versi komponen mempermudah pencarian kerentanan yang sudah diketahui.
+- `/docs`, `/redoc`, dan `/openapi.json` **dimatikan di produksi**. Pakai
+  `docs/api/openapi.json` di repo sebagai kontrak.
+- Batas ukuran unggahan kini ditegakkan per tenant, dan ada kuota penyimpanan.
+  Melampauinya menghasilkan `413`.
+
+### Yang TIDAK berubah
+
+Supaya jelas apa yang tidak perlu disentuh:
+
+- Seluruh path endpoint tetap sama.
+- Bentuk balasan sukses (`mode`, `step`, `choices`, `context`, `attachments`,
+  `sources`) tetap sama.
+- Alur guided, kuis di dalam chat, gaya belajar, dan multi-minggu tetap sama.
+- `session_id` tetap dipakai seperti sebelumnya — hanya saja kini terikat pada
+  tenant, sehingga id milik kampus lain tidak akan pernah termuat.
 
 ---
 

@@ -95,6 +95,14 @@ data/gen_cache/
 # Isi percakapan mahasiswa — data pribadi, jangan pernah masuk repositori.
 data/conversations/
 
+# Pendaftaran tenant — memuat HASH kunci API dan nama pelanggan.
+# Hash memang tidak bisa dipakai masuk, tetapi berkas ini tetap kredensial
+# sekaligus daftar pelanggan; keduanya tidak ada urusannya dengan kode.
+data/tenants/
+
+# Jejak audit — alamat IP, pola pemakaian, dan identitas kunci tiap tenant.
+data/audit/
+
 # Local tool & editor settings
 .claude/
 pyrightconfig.json
