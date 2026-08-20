@@ -30,7 +30,50 @@ class Settings(BaseSettings):
     warmup_models: bool = True
 
     # --- Inbound API auth (for other services calling this API, e.g. tim BE) ---
+    # Kunci global warisan versi satu-pelanggan. Dipertahankan HANYA agar
+    # integrasi lama tidak putus seketika; di produksi ia ditolak (lihat
+    # src/api/main.py) karena tidak membawa identitas tenant — satu kunci untuk
+    # semua pelanggan berarti tidak ada isolasi sama sekali.
     ragacademic_api_key: SecretStr = SecretStr("")
+    # Tenant yang menerima permintaan berkunci warisan tersebut, bila masih dipakai.
+    legacy_tenant_id: str = "default"
+
+    # --- Multi-tenant ---
+    # Pepper sisi server untuk hash kunci API, MAC jejak audit, dan indeks buta.
+    # WAJIB diisi di produksi dan TIDAK BOLEH berubah setelah ada kunci terbit:
+    # menggantinya membuat seluruh kunci yang beredar tidak lagi cocok dan
+    # memutus verifikasi rantai audit yang sudah tertulis.
+    tenant_key_pepper: SecretStr = SecretStr("")
+    # Di pengembangan, tanpa satu pun tenant terdaftar, permintaan tanpa kunci
+    # dilayani sebagai tenant "dev". Ditolak keras di produksi.
+    dev_anonymous_tenant: str = "dev"
+    # Cocokkan `tenant_id` yang dikirim klien dengan yang diturunkan dari kunci.
+    # Ketidakcocokan berarti salah konfigurasi di sisi pemanggil — atau percobaan
+    # mengakses data tenant lain. Keduanya harus ditolak, bukan didiamkan.
+    enforce_tenant_body_match: bool = True
+
+    # --- Enkripsi data pribadi (student_id) ---
+    encrypt_pii: bool = False
+    pii_kek: SecretStr = SecretStr("")     # base64url 32 byte; dev saja, produksi pakai KMS
+
+    # --- Pembatasan laju ---
+    rate_limit_enabled: bool = True
+    rate_limit_ip_per_minute: int = Field(default=120, ge=0, le=100_000)
+    # Baca alamat asli dari X-Forwarded-For. Nyalakan HANYA bila ada proxy tepercaya
+    # di depan yang menimpa header itu — kalau tidak, siapa pun dapat memalsukan
+    # alamatnya dan lolos dari pembatasan laju per IP.
+    trust_proxy_headers: bool = False
+
+    # --- Pengerasan HTTP ---
+    # Bintang hanya wajar saat pengembangan. Di produksi isi daftar asal yang
+    # sungguhan: `allow_credentials` bersama origin bintang membuat peramban mana
+    # pun dapat memanggil API ini dengan kredensial pengguna.
+    cors_allow_origins: str = "*"
+    trusted_hosts: str = "*"
+    max_request_body_mb: int = Field(default=110, ge=1, le=2000)
+    # HSTS hanya berarti bila TLS memang sudah dipasang di depan (proxy/ingress).
+    enable_hsts: bool = True
+    hsts_max_age: int = Field(default=31_536_000, ge=0)
 
     # --- API keys ---
     openai_api_key: SecretStr = SecretStr("")
@@ -188,6 +231,25 @@ class Settings(BaseSettings):
     @property
     def image_extensions_set(self) -> set[str]:
         return self._ext_set(self.image_extensions)
+
+    def _csv_list(self, raw: str) -> list[str]:
+        return [v.strip() for v in (raw or "").split(",") if v.strip()]
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return self._csv_list(self.cors_allow_origins) or ["*"]
+
+    @property
+    def trusted_hosts_list(self) -> list[str]:
+        return self._csv_list(self.trusted_hosts) or ["*"]
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env == "production"
+
+    @property
+    def max_request_body_bytes(self) -> int:
+        return self.max_request_body_mb * 1024 * 1024
 
     @property
     def all_known_extensions(self) -> set[str]:
