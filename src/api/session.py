@@ -228,6 +228,33 @@ class Session:
         self.awaiting = None
         self.touch()
 
+    def step_back_to(self, step: str) -> None:
+        """Mundur ke satu langkah tertentu, membuang HANYA pilihan sesudahnya.
+
+        Berbeda dari `reset_guided()` yang mengosongkan semuanya. Mahasiswa yang
+        salah memilih minggu ingin mengganti minggunya saja; memaksanya memilih
+        ulang mata kuliah membuat satu salah klik terasa seperti hukuman.
+
+        Riwayat percakapan tidak disentuh — yang dibatalkan adalah pilihan
+        navigasinya, bukan apa yang sudah dipelajari.
+        """
+        if step == "course":
+            self.course_id = None
+            self.course_name = None
+        if step in ("course", "week"):
+            self.weeks = []
+            self.topic = None
+        if step in ("course", "week", "material"):
+            self.content_id = None
+            self.source_filter = None
+        if step in ("course", "week", "material", "style"):
+            self.style = None
+        # Kuis yang sedang berjalan ikut dihentikan: soalnya melekat pada materi
+        # yang barusan ditinggalkan, jadi melanjutkannya tidak lagi masuk akal.
+        self.quiz = None
+        self.awaiting = step
+        self.touch()
+
     def add_turn(self, role: str, content: str, max_turns: int = 10) -> None:
         self.history.append({"role": role, "content": content})
         if len(self.history) > max_turns * 2:

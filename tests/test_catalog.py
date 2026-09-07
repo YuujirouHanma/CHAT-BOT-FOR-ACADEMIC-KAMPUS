@@ -50,7 +50,9 @@ class TestHumanizeCourse:
 
 class TestResolveCourseWeek:
     def test_derives_from_content_id(self) -> None:
-        assert resolve_course_week("sbd-minggu-2") == ("sbd", "SBD", 2)
+        # Nama turunan memakai nama kurasi (display_name), bukan akronim mentah —
+        # nama inilah yang muncul sebagai tombol pilihan bagi mahasiswa.
+        assert resolve_course_week("sbd-minggu-2") == ("sbd", "Sistem Basis Data", 2)
 
     def test_explicit_values_win(self) -> None:
         result = resolve_course_week(

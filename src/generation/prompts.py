@@ -319,3 +319,290 @@ def parse_quiz_json(raw: str) -> list[dict[str, Any]]:
             "explanation": str(item.get("explanation", "")).strip(),
         })
     return quiz
+
+# --- Evaluasi berkala (kuis / ETS / EAS) atas rentang minggu -------------------
+# Bentuk JSON per jenis soal. Ditulis eksplisit di prompt karena model cenderung
+# menyeragamkan semua soal menjadi pilihan ganda bila bentuknya tidak dipaksakan.
+_EVAL_SHAPES: dict[str, str] = {
+    "pilihan_ganda":
+        '{"type":"pilihan_ganda","question":"...","options":["A","B","C","D"],'
+        '"answer_index":0,"explanation":"..."}',
+    "benar_salah":
+        '{"type":"benar_salah","question":"pernyataan yang dinilai benar/salah",'
+        '"options":["Benar","Salah"],"answer_index":0,"explanation":"..."}',
+    "isian_singkat":
+        '{"type":"isian_singkat","question":"...","expected_answer":"jawaban ringkas",'
+        '"key_points":["kata kunci wajib"],"explanation":"..."}',
+    "esai":
+        '{"type":"esai","question":"...","rubric":["aspek 1","aspek 2","aspek 3"],'
+        '"explanation":"..."}',
+    "koding":
+        '{"type":"koding","question":"perintah membuat program","starter_code":"",'
+        '"expected_behavior":"apa yang harus dilakukan program",'
+        '"rubric":["benar secara logika","sesuai perintah"],"explanation":"..."}',
+}
+
+_EVAL_TYPE_NAMES: dict[str, str] = {
+    "pilihan_ganda": "PILIHAN GANDA (tepat 4 opsi, satu jawaban benar)",
+    "benar_salah": "BENAR/SALAH (pernyataan, answer_index 0=Benar 1=Salah)",
+    "isian_singkat": "ISIAN SINGKAT (jawaban 1-2 kalimat)",
+    "esai": "ESAI (jawaban uraian, sertakan rubrik penilaian)",
+    "koding": "KODING (mahasiswa menulis program)",
+}
+
+
+def build_evaluation_prompt(
+    kind_label: str, range_text: str, counts: dict[str, int],
+) -> str:
+    """Susun instruksi pembuatan evaluasi dari komposisi soal yang diminta.
+
+    Prompt dibangun dari `counts`, bukan ditulis tetap, supaya dosen yang
+    mengubah komposisi tidak perlu menyentuh kode — dan supaya komposisi yang
+    benar-benar dipakai pada sebuah penelitian dapat dilaporkan apa adanya.
+    """
+    diminta = [(t, n) for t, n in counts.items() if n > 0]
+    rincian = "\n".join(
+        f"- {n} soal {_EVAL_TYPE_NAMES.get(t, t.upper())}" for t, n in diminta
+    )
+    bentuk = "\n".join(
+        f"  {t}: {_EVAL_SHAPES[t]}" for t, _ in diminta if t in _EVAL_SHAPES
+    )
+    total = sum(n for _, n in diminta)
+
+    return (
+        f"Anda adalah penyusun soal {kind_label} untuk mahasiswa, untuk materi "
+        f"kuliah APA PUN (berlaku umum). Materi yang diberikan mencakup "
+        f"{range_text}.\n\n"
+        f"Susun TEPAT {total} soal dengan komposisi:\n{rincian}\n\n"
+        "Ketentuan:\n"
+        "1. Soal HARUS berdasarkan isi materi yang diberikan, bukan pengetahuan umum.\n"
+        "2. Karena materi mencakup beberapa minggu, sertakan soal yang menuntut "
+        "mahasiswa MENGHUBUNGKAN konsep antar minggu, bukan hanya mengingat satu bagian.\n"
+        "3. Urutkan dari yang mudah ke yang sulit.\n"
+        "4. Setiap soal wajib memuat `explanation` berisi alasan jawabannya.\n\n"
+        "Jawab HANYA dengan JSON valid berupa array objek, tanpa markdown, tanpa "
+        "teks pembuka maupun penutup. Bentuk tiap objek menurut jenisnya:\n"
+        f"{bentuk}"
+    )
+
+
+def _clean_json_array(raw: str) -> Any:
+    """Ambil array JSON dari keluaran model, tahan terhadap pagar markdown."""
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        return json.loads(clean)
+    except Exception:
+        match = re.search(r"\[[\s\S]*\]", clean)
+        if not match:
+            return None
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            return None
+
+
+def _parse_choice_item(item: dict, tipe: str) -> dict[str, Any] | None:
+    """Butir berbasis opsi (pilihan ganda / benar-salah)."""
+    options = item.get("options")
+    idx = item.get("answer_index")
+    if tipe == "benar_salah" and not isinstance(options, list):
+        options = ["Benar", "Salah"]      # model kerap menghilangkannya
+    if not isinstance(options, list) or len(options) < 2:
+        return None
+    if tipe == "pilihan_ganda" and len(options) != 4:
+        return None
+    if not isinstance(idx, bool) and isinstance(idx, int) and 0 <= idx < len(options):
+        return {"options": [str(o) for o in options], "answer_index": idx}
+    return None
+
+
+def parse_evaluation_json(raw: str) -> list[dict[str, Any]]:
+    """Parse array soal evaluasi bercampur jenis.
+
+    Butir yang bentuknya tidak lengkap DIBUANG, bukan diperbaiki dengan tebakan.
+    Soal evaluasi menentukan nilai mahasiswa; menambal butir yang cacat berarti
+    menilai dengan soal yang tidak pernah benar-benar disusun.
+    """
+    data = _clean_json_array(raw)
+    if not isinstance(data, list):
+        return []
+
+    hasil: list[dict[str, Any]] = []
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+        tipe = str(item.get("type", "pilihan_ganda")).strip().lower()
+        question = str(item.get("question", "")).strip()
+        if not question or tipe not in _EVAL_SHAPES:
+            continue
+
+        butir: dict[str, Any] = {
+            "type": tipe,
+            "question": question,
+            "explanation": str(item.get("explanation", "")).strip(),
+        }
+
+        if tipe in ("pilihan_ganda", "benar_salah"):
+            inti = _parse_choice_item(item, tipe)
+            if inti is None:
+                continue
+            butir.update(inti)
+        elif tipe == "isian_singkat":
+            jawab = str(item.get("expected_answer", "")).strip()
+            if not jawab:
+                continue
+            kunci = item.get("key_points")
+            butir["expected_answer"] = jawab
+            butir["key_points"] = (
+                [str(k) for k in kunci] if isinstance(kunci, list) else []
+            )
+        elif tipe == "esai":
+            rubrik = item.get("rubric")
+            butir["rubric"] = (
+                [str(r) for r in rubrik] if isinstance(rubrik, list) else []
+            )
+        elif tipe == "koding":
+            butir["starter_code"] = str(item.get("starter_code", ""))
+            butir["expected_behavior"] = str(item.get("expected_behavior", "")).strip()
+            rubrik = item.get("rubric")
+            butir["rubric"] = (
+                [str(r) for r in rubrik] if isinstance(rubrik, list) else []
+            )
+
+        hasil.append(butir)
+    return hasil
+
+
+GRADE_SYSTEM_PROMPT = (
+    "Anda adalah pemeriksa jawaban mahasiswa. Nilai jawaban terhadap kunci atau "
+    "rubrik yang diberikan, dengan adil dan konsisten.\n"
+    "Ketentuan:\n"
+    "1. Nilai ISI, bukan gaya bahasa atau panjang jawaban.\n"
+    "2. Jawaban benar yang diungkapkan dengan kata berbeda tetap bernilai penuh.\n"
+    "3. Beri `skor` antara 0.0 dan 1.0 - boleh pecahan untuk jawaban benar sebagian.\n"
+    "4. `feedback` ditujukan KEPADA MAHASISWA: sebut apa yang sudah tepat dan apa "
+    "yang kurang, maksimal 2 kalimat, memakai kata ganti orang kedua.\n"
+    "5. Bila Anda ragu - jawaban ambigu, di luar cakupan kunci, atau menuntut "
+    "penilaian manusia - isi `ragu` dengan true. Menandai ragu JAUH lebih baik "
+    "daripada menebak, karena butir itu akan ditinjau dosen.\n"
+    "Jawab HANYA JSON: "
+    '{"skor": 0.0, "benar": false, "ragu": false, "feedback": "..."}'
+)
+
+
+def parse_grade_json(raw: str) -> dict[str, Any] | None:
+    """Parse hasil penilaian LLM atas satu jawaban terbuka.
+
+    Mengembalikan None bila tidak terbaca — pemanggil menandainya sebagai perlu
+    tinjauan dosen, bukan memberinya nilai nol. Kegagalan mesin bukan kesalahan
+    mahasiswa.
+    """
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    data: Any = None
+    try:
+        data = json.loads(clean)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", clean)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        return None
+    try:
+        skor = float(data.get("skor", 0.0))
+    except (TypeError, ValueError):
+        return None
+    skor = max(0.0, min(1.0, skor))
+    return {
+        "skor": skor,
+        # `benar` berarti BENAR PENUH, dan harus sejalan dengan skornya.
+        # Model kerap mengembalikan benar=true bersama skor 0.5 — sekadar
+        # bermaksud "arahnya sudah betul". Mempercayainya apa adanya membuat
+        # hitungan "berapa soal yang benar" menggelembung, dan pada penelitian
+        # angka itulah yang dilaporkan. Skor tetap menyimpan nilai parsialnya.
+        "benar": bool(data.get("benar", True)) and skor >= 0.999,
+        "ragu": bool(data.get("ragu", False)),
+        "feedback": str(data.get("feedback", "")).strip(),
+    }
+
+
+# --- Tinjauan kode mahasiswa (livecode) ----------------------------------------
+# Berbeda dari GRADE_SYSTEM_PROMPT yang menilai jawaban tulisan: di sini yang
+# dinilai adalah program, dan tujuannya BELAJAR — bukan sekadar memberi angka.
+CODE_REVIEW_SYSTEM_PROMPT = (
+    "Anda adalah asisten dosen yang memeriksa program mahasiswa pemula.\n"
+    "Kode TIDAK dijalankan; nilailah dengan membaca dan menalar alurnya.\n\n"
+    "Ketentuan:\n"
+    "1. Tentukan apakah program memenuhi perilaku yang diminta. Perbedaan gaya "
+    "penulisan, nama variabel, atau pendekatan (iteratif vs rekursif) BUKAN "
+    "kesalahan selama hasilnya benar.\n"
+    "2. Sebutkan lebih dulu apa yang SUDAH BENAR. Mahasiswa pemula yang hanya "
+    "menerima daftar kesalahan cenderung berhenti mencoba.\n"
+    "3. Untuk tiap kekeliruan, sebut letaknya (nomor baris bila jelas) dan "
+    "AKIBATNYA pada hasil program - bukan sekadar 'salah'.\n"
+    "4. Beri `petunjuk` yang mengarahkan mahasiswa menemukan sendiri "
+    "perbaikannya. JANGAN menuliskan kode perbaikan yang lengkap: menyodorkan "
+    "jawaban menyelesaikan soalnya, tetapi menghapus proses belajarnya.\n"
+    "5. `skor` antara 0.0 dan 1.0. Program yang logikanya benar tetapi kurang "
+    "rapi tetap bernilai tinggi.\n"
+    "6. Isi `ragu` dengan true bila Anda tidak yakin - misalnya alurnya terlalu "
+    "rumit untuk ditelusuri tanpa menjalankannya. Ditinjau dosen jauh lebih "
+    "baik daripada dinilai asal.\n\n"
+    "Jawab HANYA JSON:\n"
+    '{"lulus": false, "skor": 0.0, "ragu": false, "ringkasan": "...", '
+    '"benar": ["..."], "keliru": [{"baris": 3, "masalah": "...", "akibat": "..."}], '
+    '"petunjuk": ["..."]}'
+)
+
+
+def parse_code_review_json(raw: str) -> dict[str, Any] | None:
+    """Parse hasil tinjauan kode. None bila tidak terbaca.
+
+    None ditangani pemanggil sebagai perlu tinjauan dosen, bukan sebagai nilai
+    nol — kegagalan mesin bukan kesalahan mahasiswa.
+    """
+    clean = raw.replace("```json", "").replace("```", "").strip()
+    data: Any = None
+    try:
+        data = json.loads(clean)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", clean)
+        if m:
+            try:
+                data = json.loads(m.group(0))
+            except Exception:
+                data = None
+    if not isinstance(data, dict):
+        return None
+
+    try:
+        skor = float(data.get("skor", 0.0))
+    except (TypeError, ValueError):
+        skor = 0.0
+
+    def _daftar_teks(nilai: Any) -> list[str]:
+        return [str(x).strip() for x in nilai if str(x).strip()] if isinstance(nilai, list) else []
+
+    keliru: list[dict[str, Any]] = []
+    for k in (data.get("keliru") or []):
+        if isinstance(k, dict) and str(k.get("masalah", "")).strip():
+            baris = k.get("baris")
+            keliru.append({
+                "baris": baris if isinstance(baris, int) else None,
+                "masalah": str(k["masalah"]).strip(),
+                "akibat": str(k.get("akibat", "")).strip(),
+            })
+        elif isinstance(k, str) and k.strip():
+            keliru.append({"baris": None, "masalah": k.strip(), "akibat": ""})
+
+    return {
+        "lulus": bool(data.get("lulus", False)),
+        "skor": max(0.0, min(1.0, skor)),
+        "ragu": bool(data.get("ragu", False)),
+        "ringkasan": str(data.get("ringkasan", "")).strip(),
+        "benar": _daftar_teks(data.get("benar")),
+        "keliru": keliru,
+        "petunjuk": _daftar_teks(data.get("petunjuk")),
+    }

@@ -87,7 +87,9 @@ class ChoiceInfo(BaseModel):
     """Satu pilihan yang bisa diklik mahasiswa di chat."""
     label: str
     value: str
-    kind: Literal["course", "week", "material", "style", "question", "quiz"]
+    kind: Literal[
+        "course", "week", "material", "style", "question", "quiz", "back",
+    ]
 
 
 class ChatContext(BaseModel):
@@ -313,6 +315,305 @@ class LearningStyleInfo(BaseModel):
 class LearningStyleListResponse(BaseModel):
     default: str
     styles: list[LearningStyleInfo]
+
+
+# --- Validasi dosen atas jawaban AI ---
+class ValidationAnswerInfo(BaseModel):
+    """Satu jawaban AI beserta status validasinya."""
+    interaction_id: str
+    at: str | None = None
+    question: str = ""
+    answer: str = ""
+    sources: list[SourceInfo] = Field(default_factory=list)
+    content_id: str | None = None
+    course_id: str | None = None
+    session_id: str | None = None
+    # Kosong berarti belum dinilai siapa pun.
+    verdict: Literal["sesuai", "perlu_perbaikan", "tidak_sesuai"] | None = None
+    catatan: str = ""
+    dosen_id: str = ""
+
+
+class ValidationListResponse(BaseModel):
+    total: int
+    answers: list[ValidationAnswerInfo]
+
+
+class ValidationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    verdict: Literal["sesuai", "perlu_perbaikan", "tidak_sesuai"]
+    # Wajib bila putusannya bukan "sesuai" — divalidasi di lapisan domain.
+    # Menandai salah tanpa menjelaskan salahnya di mana tidak menolong siapa pun.
+    catatan: str | None = Field(default=None, max_length=4000)
+    dosen_id: str | None = Field(default=None, max_length=128)
+    course_id: str | None = Field(default=None, max_length=128)
+    content_id: str | None = Field(default=None, max_length=128)
+    tenant_id: str | None = Field(default=None, max_length=64)
+
+
+class ValidationVerdictResponse(BaseModel):
+    interaction_id: str
+    verdict: str
+    catatan: str = ""
+    at: str
+
+
+class ValidationStatsResponse(BaseModel):
+    total_jawaban: int
+    sudah_dinilai: int
+    belum_dinilai: int
+    rincian: dict[str, int]
+    # None (bukan 0) bila belum ada yang dinilai — "belum diukur" tidak boleh
+    # terbaca sebagai "akurasinya nol".
+    akurasi: float | None = None
+
+
+# --- Evaluasi berkala (kuis / ETS / EAS) ---
+class EvaluationPlanInfo(BaseModel):
+    """Rencana sebuah evaluasi: kapan, jenisnya apa, mencakup minggu mana."""
+    week: int
+    kind: str
+    label: str
+    weeks_covered: list[int]
+    range_text: str
+    counts: dict[str, int]
+    total: int
+
+
+class EvaluationScheduleResponse(BaseModel):
+    evaluation_weeks: list[int]
+    plans: list[EvaluationPlanInfo]
+
+
+class _EvaluationTarget(BaseModel):
+    """Bagian permintaan yang menentukan evaluasi mana yang dimaksud."""
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(min_length=1, max_length=128)
+    # Salah satu wajib: `week` memakai jadwal bawaan, `weeks` rentang bebas.
+    week: int | None = Field(default=None, ge=1, le=52)
+    weeks: list[int] | None = Field(default=None, max_length=52)
+    kind: Literal["kuis", "ets", "eas"] | None = None
+    # Komposisi soal khusus; kosong = memakai komposisi bawaan jenis tersebut.
+    counts: dict[str, int] | None = None
+    model: str | None = Field(default=None, max_length=64)
+    tenant_id: str | None = Field(default=None, max_length=64)
+
+
+class EvaluationQuestionsRequest(_EvaluationTarget):
+    pass
+
+
+class EvaluationItemInfo(BaseModel):
+    """Satu soal seperti yang dilihat mahasiswa.
+
+    Tanpa kunci jawaban maupun rubrik — keduanya hanya ada di sisi server.
+    """
+    index: int
+    type: str
+    question: str
+    options: list[str] = Field(default_factory=list)
+    starter_code: str = ""
+
+
+class EvaluationQuestionsResponse(BaseModel):
+    course_id: str
+    plan: EvaluationPlanInfo
+    items: list[EvaluationItemInfo]
+
+
+class EvaluationSubmitRequest(_EvaluationTarget):
+    # Urut sesuai soal. Objektif berupa indeks opsi (int); isian/esai/koding
+    # berupa teks. None berarti tidak dijawab.
+    answers: list[int | str | None] = Field(default_factory=list, max_length=40)
+
+
+class GradedItemInfo(BaseModel):
+    index: int
+    type: str
+    question: str
+    your_answer: int | str | None = None
+    correct_answer: int | str | None = None
+    # None = belum dapat dipastikan mesin; menunggu tinjauan dosen.
+    is_correct: bool | None = None
+    score: float
+    explanation: str = ""
+    feedback: str = ""
+
+
+class EvaluationSubmitResponse(BaseModel):
+    course_id: str
+    plan: EvaluationPlanInfo
+    total: int
+    benar: int
+    skor: float                      # 0-100
+    per_jenis: dict[str, dict] = Field(default_factory=dict)
+    perlu_tinjauan: int = 0
+    items: list[GradedItemInfo]
+
+
+# --- Livecode: latihan koding ---
+class _LivecodeTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    course_id: str = Field(min_length=1, max_length=128)
+    weeks: list[int] = Field(min_length=1, max_length=52)
+    model: str | None = Field(default=None, max_length=64)
+    tenant_id: str | None = Field(default=None, max_length=64)
+
+
+class LivecodeExercisesRequest(_LivecodeTarget):
+    count: int = Field(default=3, ge=1, le=10)
+
+
+class LivecodeExerciseInfo(BaseModel):
+    """Latihan seperti yang dilihat mahasiswa.
+
+    Tanpa rubrik dan tanpa keluaran kasus uji — kalau ikut dikirim, mahasiswa
+    dapat menuliskan jawabannya langsung tanpa menulis programnya.
+    """
+    exercise_id: str
+    title: str
+    prompt: str
+    language: str = "python"
+    starter_code: str = ""
+    expected_behavior: str = ""
+    required_function: str = ""
+    forbidden_names: list[str] = Field(default_factory=list)
+    example_inputs: list = Field(default_factory=list)
+
+
+class LivecodeExercisesResponse(BaseModel):
+    course_id: str
+    exercises: list[LivecodeExerciseInfo]
+
+
+class LivecodeSubmitRequest(_LivecodeTarget):
+    exercise_id: str = Field(min_length=1, max_length=256)
+    code: str = Field(max_length=20_000)
+    student_id: str | None = Field(default=None, max_length=128)
+    session_id: str | None = Field(default=None, max_length=128)
+    count: int = Field(default=3, ge=1, le=10)
+
+
+class CodeFindingInfo(BaseModel):
+    severity: Literal["galat", "peringatan", "info"]
+    message: str
+    line: int | None = None
+
+
+class CodeErrorInfo(BaseModel):
+    baris: int | None = None
+    masalah: str
+    akibat: str = ""
+
+
+class LivecodeSubmitResponse(BaseModel):
+    exercise_id: str
+    submission_id: str = ""
+    lulus: bool
+    skor: float
+    ringkasan: str = ""
+    # Temuan analisis statis (sintaks, fungsi wajib, konstruksi terlarang).
+    temuan: list[CodeFindingInfo] = Field(default_factory=list)
+    # Disebut lebih dulu: mahasiswa pemula yang hanya menerima daftar kesalahan
+    # cenderung berhenti mencoba.
+    benar: list[str] = Field(default_factory=list)
+    keliru: list[CodeErrorInfo] = Field(default_factory=list)
+    # Mengarahkan, bukan memberi kode jadi.
+    petunjuk: list[str] = Field(default_factory=list)
+    perlu_tinjauan_dosen: bool = False
+
+
+class LivecodeSubmissionInfo(BaseModel):
+    submission_id: str
+    at: str | None = None
+    exercise_id: str
+    student_id: str | None = None
+    lulus: bool | None = None
+    skor: float | None = None
+    code: str = ""
+
+
+class LivecodeSubmissionListResponse(BaseModel):
+    total: int
+    submissions: list[LivecodeSubmissionInfo]
+
+
+class LivecodeStatsResponse(BaseModel):
+    exercise_id: str
+    total_kiriman: int
+    lulus: int
+    rasio_lulus: float | None = None
+
+
+# --- Admin: pengelolaan tenant ---
+class AdminTenantSummary(BaseModel):
+    tenant_id: str
+    name: str = ""
+    status: str = "active"
+    created_at: str | None = None
+    active_keys: int = 0
+
+
+class AdminTenantKeyInfo(BaseModel):
+    """Metadata sebuah kunci. Rahasianya tidak pernah dapat ditampilkan lagi."""
+    key_id: str
+    label: str = ""
+    scopes: list[str] = Field(default_factory=list)
+    allowed_courses: list[str] | None = None
+    created_at: str | None = None
+    revoked_at: str | None = None
+    last_used_at: str | None = None
+
+
+class AdminTenantDetail(AdminTenantSummary):
+    quota: dict[str, int] = Field(default_factory=dict)
+    keys: list[AdminTenantKeyInfo] = Field(default_factory=list)
+
+
+class AdminTenantListResponse(BaseModel):
+    total: int
+    tenants: list[AdminTenantSummary]
+
+
+class AdminTenantCreateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str = Field(min_length=2, max_length=63)
+    name: str | None = Field(default=None, max_length=200)
+    quota: dict[str, int] | None = None
+
+
+class AdminIssueKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str | None = Field(default=None, max_length=200)
+    # Kosong = hak pembaca (aplikasi mahasiswa).
+    scopes: list[str] | None = None
+    # ABAC: bila diisi, kunci ini hanya boleh menyentuh mata kuliah tersebut.
+    allowed_courses: list[str] | None = None
+
+
+class AdminIssuedKeyResponse(BaseModel):
+    tenant_id: str
+    key_id: str
+    # Muncul SEKALI seumur hidup kunci.
+    api_key: str
+    peringatan: str
+
+
+class AdminStatusRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["active", "suspended"]
+
+
+class AdminPurgeResponse(BaseModel):
+    tenant_id: str
+    conversations_deleted: int
+    catatan: str
 
 
 # --- Error ---

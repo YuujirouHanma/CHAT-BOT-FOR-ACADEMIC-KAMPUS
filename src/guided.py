@@ -29,7 +29,9 @@ from typing import Literal
 # Literal (bukan str lepas) supaya nilainya ikut tervalidasi saat dipetakan ke
 # schema API — salah tulis langkah jadi error di type checker, bukan di runtime.
 StepName = Literal["course", "week", "material", "style", "question", "answer", "quiz"]
-ChoiceKind = Literal["course", "week", "material", "style", "question", "quiz"]
+ChoiceKind = Literal[
+    "course", "week", "material", "style", "question", "quiz", "back",
+]
 
 STEP_COURSE: StepName = "course"       # menanyakan mata kuliah
 STEP_WEEK: StepName = "week"           # menanyakan minggu
@@ -383,6 +385,76 @@ def wants_reset(text: str) -> bool:
     pada satu materi dan tidak tahu cara berpindah.
     """
     return bool(_RESET_RE.search(_fold(text)))
+
+
+# --- Kembali satu langkah -------------------------------------------------------
+# Berbeda dari "ulangi dari awal" (_RESET_PHRASES) yang membuang SELURUH konteks.
+# Mahasiswa yang salah pilih minggu hampir selalu ingin mengganti minggunya saja,
+# bukan mengulang dari pemilihan mata kuliah — memaksa mereka mengulang semuanya
+# membuat satu salah klik terasa seperti hukuman.
+_BACK_PHRASES = (
+    "kembali", "balik", "back", "sebelumnya", "batal", "ganti pilihan",
+    "salah pilih", "salah klik", "bukan itu", "mundur",
+)
+_BACK_RE = _phrase_re(_BACK_PHRASES)
+
+# Langkah sebelum sebuah langkah. STEP_COURSE tidak punya pendahulu — ia sudah
+# paling awal, jadi tombol kembali tidak ditampilkan di sana.
+_PREVIOUS_STEP: dict[str, StepName] = {
+    STEP_WEEK: STEP_COURSE,
+    STEP_MATERIAL: STEP_WEEK,
+    STEP_STYLE: STEP_MATERIAL,
+    STEP_QUESTION: STEP_STYLE,
+}
+
+# Langkah tujuan yang sah bagi tombol kembali — dipakai juga untuk mengenali
+# `value` yang dikirim balik klien.
+BACK_TARGETS: frozenset[str] = frozenset(_PREVIOUS_STEP.values())
+
+# Kalimat pada tombolnya. Menyebut TUJUAN, bukan sekadar "kembali", supaya
+# mahasiswa tahu akan dibawa ke mana sebelum menekannya.
+_BACK_LABELS: dict[str, str] = {
+    STEP_COURSE: "Kembali — pilih mata kuliah lain",
+    STEP_WEEK: "Kembali — pilih minggu lain",
+    STEP_MATERIAL: "Kembali — pilih materi lain",
+    STEP_STYLE: "Kembali — ganti cara belajar",
+}
+
+
+def wants_back(text: str) -> bool:
+    """Apakah pesan ini berarti "kembali ke langkah sebelumnya".
+
+    Menerima DUA bentuk, karena klien wajar mengirim salah satunya:
+    label tombol apa adanya ("Kembali — pilih materi lain"), atau `value`-nya
+    yang berupa nama langkah tujuan ("material"). Menerima label saja membuat
+    klien yang mengirim `value` — pola yang dipakai untuk jenis pilihan lain —
+    menekan tombol tanpa terjadi apa pun: kegagalan yang tidak memunculkan
+    galat, jadi tidak ada yang menyadarinya sampai ada mahasiswa mengeluh.
+    """
+    bersih = _fold(text).strip()
+    if bersih in _PREVIOUS_STEP.values():
+        return True
+    return bool(_BACK_RE.search(bersih))
+
+
+def previous_step(step: str | None) -> StepName | None:
+    """Langkah sebelum `step`; None bila sudah paling awal."""
+    return _PREVIOUS_STEP.get(step or "")
+
+
+def back_choice(step: str | None) -> Choice | None:
+    """Tombol kembali untuk sebuah langkah; None bila tidak ada langkah sebelumnya.
+
+    `value` diisi nama langkah TUJUAN, bukan kata "kembali", supaya klien yang
+    mengirim balik nilainya tetap terbaca benar walau teksnya tidak dikenali
+    pengenal maksud.
+    """
+    sebelum = previous_step(step)
+    if sebelum is None:
+        return None
+    return Choice(
+        label=_BACK_LABELS.get(sebelum, "Kembali"), value=sebelum, kind="back",
+    )
 
 
 _QUIZ_PHRASES = (

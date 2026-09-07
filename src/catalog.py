@@ -38,10 +38,33 @@ def parse_content_id(content_id: str | None) -> tuple[str | None, int | None]:
     return (course or None), int(match.group("week"))
 
 
-def humanize_course(course_id: str | None) -> str | None:
-    """Best-effort display name from a slug: 'dasar-pemrograman' → 'Dasar Pemrograman'.
+# Nama tampilan untuk mata kuliah yang sudah dikenal. Penebakan dari slug
+# menghasilkan "Dasprog Rka" — benar secara mekanis, tetapi bukan nama yang
+# dikenali mahasiswa, dan nama itulah yang muncul sebagai tombol pilihan.
+# Kelas paralel (RKA/IF) sengaja dipisah menjadi dua mata kuliah: materinya
+# berbeda, dan mencampurnya membuat mahasiswa satu kelas melihat bahan kelas lain.
+KNOWN_COURSE_NAMES: dict[str, str] = {
+    "dasprog-rka": "Dasar Pemrograman (RKA)",
+    "dasprog-if": "Dasar Pemrograman (IF)",
+    "sbd": "Sistem Basis Data",
+    "kka": "Konsep Kecerdasan Artifisial",
+    "rsbp": "Rekayasa Sistem Berbasis Pengetahuan",
+    "strukdat": "Struktur Data",
+}
 
-    A short all-letters slug (e.g. 'sbd') is uppercased as a likely acronym.
+
+def humanize_course(course_id: str | None) -> str | None:
+    """Nama tampilan hasil TEBAKAN MEKANIS dari slug.
+
+    'dasar-pemrograman' → 'Dasar Pemrograman'; slug pendek beralfabet
+    (mis. 'sbd') dianggap akronim dan dikapitalkan.
+
+    Sengaja tidak melihat `KNOWN_COURSE_NAMES`: `QdrantStore.list_courses`
+    memakai fungsi ini sebagai pembanding untuk mengenali "nama ini cuma
+    tebakan, jadi nama eksplisit dari pengunggah boleh menggantikannya".
+    Kalau di sini ikut mengembalikan nama kurasi, perbandingan itu tidak
+    pernah cocok dan nama eksplisit tidak pernah menang. Untuk menampilkan
+    nama kepada pengguna, pakai `display_name()`.
     """
     if not course_id:
         return None
@@ -49,6 +72,17 @@ def humanize_course(course_id: str | None) -> str | None:
     if len(words) == 1 and words[0].isalpha() and len(words[0]) <= 4:
         return words[0].upper()
     return " ".join(w.capitalize() for w in words) or None
+
+
+def display_name(course_id: str | None) -> str | None:
+    """Nama yang ditampilkan kepada mahasiswa.
+
+    Nama kurasi lebih dulu, lalu tebakan mekanis. Dipakai hanya di titik
+    penyajian — bukan sebagai pembanding di dalam logika katalog.
+    """
+    if not course_id:
+        return None
+    return KNOWN_COURSE_NAMES.get(course_id.strip().lower()) or humanize_course(course_id)
 
 
 def resolve_course_week(
@@ -61,5 +95,5 @@ def resolve_course_week(
     parsed_course, parsed_week = parse_content_id(content_id)
     course_id = course_id or parsed_course
     week = week if week is not None else parsed_week
-    course_name = course_name or humanize_course(course_id)
+    course_name = course_name or display_name(course_id)
     return course_id, course_name, week

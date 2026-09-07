@@ -137,3 +137,91 @@ class TestNotebook:
     )
     def test_safe_filename(self, nama: str, harap: str) -> None:
         assert safe_filename(nama) == harap
+
+
+class TestRegresiNamaMataKuliah:
+    """Nama mata kuliah tidak boleh diam-diam menetapkan gaya belajar.
+
+    Ditemukan saat uji ujung-ke-ujung: pencocokan dulu memakai substring, dan
+    isyarat "dasar" ada di dalam "Dasar Pemrograman". Akibatnya sekadar MEMILIH
+    mata kuliah sudah menetapkan gaya, sehingga langkah "mau dijelaskan dengan
+    cara apa?" terlewat tanpa ada yang menyadarinya — mematikan rotasi gaya
+    yang justru menjadi inti rancangan penelitiannya.
+    """
+
+    @pytest.mark.parametrize(
+        "nama",
+        [
+            "Dasar Pemrograman (RKA)",
+            "Dasar Pemrograman (IF)",
+            "Sistem Basis Data",
+            "Konsep Kecerdasan Artifisial",
+            "Rekayasa Sistem Berbasis Pengetahuan",
+            "Struktur Data",
+            "Minggu 2",
+            "Branching and Iteration - MIT.pdf",
+            "apa itu perulangan",
+            "jelaskan program ini",
+            "berikan contoh soal",
+        ],
+    )
+    def test_pilihan_navigasi_tidak_menetapkan_gaya(self, nama: str) -> None:
+        assert learning_styles.match(nama) is None
+
+    @pytest.mark.parametrize(
+        ("teks", "harapan"),
+        [
+            ("pakai diagram dong", "visual"),
+            ("mau lewat kode", "praktik"),
+            ("ringkas aja", "ringkas"),
+            ("jelaskan pelan-pelan", "naratif"),
+            ("Lewat diagram", "visual"),
+            ("Lewat contoh & kode", "praktik"),
+            ("Poin-poin ringkas", "ringkas"),
+        ],
+    )
+    def test_permintaan_gaya_sungguhan_tetap_dikenali(
+        self, teks: str, harapan: str,
+    ) -> None:
+        assert learning_styles.match(teks) == harapan
+
+
+class TestLabelTombolBukanPertanyaan:
+    """Label tombol gaya harus dikenali sebagai PILIHAN, bukan pertanyaan.
+
+    Ditemukan saat uji coba manual: dua dari lima label — "Lewat contoh & kode
+    — Banyak contoh nyata…" dan "Poin-poin ringkas — Padat dan langsung ke
+    inti…" — cukup panjang dan berisi banyak kata isi sehingga lolos sebagai
+    pertanyaan, lalu dijawab sungguhan. Mahasiswa menunggu dua menit untuk
+    jawaban atas teks tombol yang baru saja ia tekan, dan satu panggilan LLM
+    terbuang.
+    """
+
+    def test_setiap_label_dikenali_sebagai_pilihan(self) -> None:
+        for spec in learning_styles.all_styles():
+            label = learning_styles.choice_label(spec)
+            assert learning_styles.is_choice_label(label), spec.key
+
+    def test_label_pendek_dan_key_juga_dikenali(self) -> None:
+        # Klien boleh mengirim balik label saja, atau key-nya.
+        for spec in learning_styles.all_styles():
+            assert learning_styles.is_choice_label(spec.label)
+            assert learning_styles.is_choice_label(spec.key)
+
+    @pytest.mark.parametrize(
+        "teks",
+        [
+            "apa itu perulangan while",
+            "jelaskan perbedaan for dan while",
+            "bagaimana cara kerja break",
+            "kenapa indentasi penting di Python",
+        ],
+    )
+    def test_pertanyaan_sungguhan_bukan_label(self, teks: str) -> None:
+        assert not learning_styles.is_choice_label(teks)
+
+    def test_label_dirakit_dari_satu_sumber(self) -> None:
+        # Tombol dibuat pipeline dan dikenali di sini; kalau bentuknya dirakit
+        # di dua tempat, keduanya bisa menyimpang tanpa ada yang menyadarinya.
+        spec = learning_styles.resolve("ringkas")
+        assert learning_styles.choice_label(spec) == f"{spec.label} — {spec.description}"

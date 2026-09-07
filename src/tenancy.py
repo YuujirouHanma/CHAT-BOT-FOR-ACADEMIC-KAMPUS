@@ -45,6 +45,7 @@ SCOPE_CONTENT_READ: Final = "content:read"
 SCOPE_CONTENT_WRITE: Final = "content:write"
 SCOPE_CONVERSATION_READ: Final = "conversation:read"
 SCOPE_CONVERSATION_DELETE: Final = "conversation:delete"
+SCOPE_VALIDATE: Final = "answer:validate"   # dosen menilai jawaban AI
 SCOPE_ADMIN: Final = "admin:tenants"
 
 ALL_SCOPES: Final = frozenset({
@@ -54,6 +55,7 @@ ALL_SCOPES: Final = frozenset({
     SCOPE_CONTENT_WRITE,
     SCOPE_CONVERSATION_READ,
     SCOPE_CONVERSATION_DELETE,
+    SCOPE_VALIDATE,
     SCOPE_ADMIN,
 })
 

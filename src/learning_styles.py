@@ -16,6 +16,7 @@ dapatkan, bukan sekadar berganti nada.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 DEFAULT_STYLE = "naratif"
@@ -139,30 +140,82 @@ def resolve(key: str | None) -> LearningStyle:
     return get(key) or _BY_KEY[DEFAULT_STYLE]
 
 
+def choice_label(spec: LearningStyle) -> str:
+    """Teks tombol untuk sebuah gaya — satu sumber, dipakai UI dan pengenalnya.
+
+    Dulu bentuk ini dirakit di dua tempat (pipeline saat membuat tombol, dan
+    tak dikenali sama sekali saat tombolnya diklik). Menyatukannya di sini yang
+    membuat keduanya tidak mungkin lagi berbeda.
+    """
+    return f"{spec.label} — {spec.description}"
+
+
+def is_choice_label(text: str) -> bool:
+    """Apakah teks ini persis label tombol gaya yang kita tawarkan.
+
+    Dipakai untuk membedakan KLIK TOMBOL dari PERTANYAAN. Tanpa pembedaan itu,
+    label yang panjang dan berisi banyak kata isi — "Poin-poin ringkas — Padat
+    dan langsung ke inti, cocok saat mengulang sebelum ujian" — lolos sebagai
+    pertanyaan, lalu dijawab sungguhan. Mahasiswa menunggu dua menit untuk
+    jawaban atas teks tombol yang baru saja ia tekan.
+    """
+    if not text:
+        return False
+    t = " ".join(text.strip().lower().split())
+    for spec in _STYLES:
+        if t in (choice_label(spec).lower(), spec.label.lower(), spec.key):
+            return True
+    return False
+
+
+def _mengandung_kata(teks: str, frasa: str) -> bool:
+    """Apakah `frasa` muncul sebagai kata utuh di dalam `teks`.
+
+    "poin" cocok pada "kasih poin-poin saja" tetapi TIDAK pada "titik poinsettia".
+    Pembedaan itulah yang membuat sebuah nama — mata kuliah, judul berkas —
+    berhenti menetapkan gaya belajar hanya karena memuat potongan kata yang
+    kebetulan sama.
+    """
+    return re.search(rf"(?<!\w){re.escape(frasa)}(?!\w)", teks) is not None
+
+
 def match(text: str) -> str | None:
     """Kenali gaya belajar yang disebut mahasiswa dalam teks bebas.
 
     Dicocokkan ke key maupun label, supaya "visual", "lewat diagram", dan
     "pakai gambar" sama-sama dikenali.
+
+    Pencocokan memakai BATAS KATA, bukan substring. Sempat memakai substring
+    dan itu keliru dengan akibat yang tidak kelihatan: mata kuliah "Dasar
+    Pemrograman" memuat kata "dasar", sehingga sekadar MEMILIH mata kuliah
+    diam-diam menetapkan gaya belajar — dan langkah "mau dijelaskan dengan cara
+    apa?" terlewat begitu saja tanpa ada yang menyadarinya.
+
+    Isyarat yang terlalu umum ("dasar", "contoh", "program") sengaja tidak
+    dipakai sama sekali: ketiganya jauh lebih sering muncul sebagai bagian nama
+    mata kuliah atau pertanyaan biasa daripada sebagai permintaan gaya belajar.
     """
     if not text:
         return None
     t = text.strip().lower()
+
     for s in _STYLES:
-        if s.key in t or s.label.lower() in t:
+        if _mengandung_kata(t, s.key) or _mengandung_kata(t, s.label.lower()):
             return s.key
+
     isyarat = {
-        "diagram": "visual", "gambar": "visual", "bagan": "visual", "visual": "visual",
-        "kode": "praktik", "coding": "praktik", "program": "praktik",
-        "praktek": "praktik", "praktik": "praktik", "contoh": "praktik",
+        "diagram": "visual", "gambar": "visual", "bagan": "visual",
+        "visual": "visual", "flowchart": "visual", "skema": "visual",
+        "kode": "praktik", "coding": "praktik", "ngoding": "praktik",
+        "praktek": "praktik", "praktik": "praktik",
         "notebook": "praktik", "ipynb": "praktik",
         "ringkas": "ringkas", "singkat": "ringkas", "padat": "ringkas",
-        "poin": "ringkas", "rangkuman": "ringkas",
+        "poin": "ringkas", "rangkuman": "ringkas", "intinya": "ringkas",
         "tanya balik": "sokratik", "sokratik": "sokratik", "dituntun": "sokratik",
-        "pelan": "naratif", "bertahap": "naratif", "dasar": "naratif",
-        "analogi": "naratif",
+        "pelan": "naratif", "bertahap": "naratif", "analogi": "naratif",
+        "cerita": "naratif",
     }
     for kata, key in isyarat.items():
-        if kata in t:
+        if _mengandung_kata(t, kata):
             return key
     return None

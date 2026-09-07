@@ -53,6 +53,16 @@ def _context_of(session: Session) -> ChatContext:
     )
 
 
+def _with_back(choices: list[guided.Choice], step: str) -> list[guided.Choice]:
+    """Tambahkan tombol kembali di AKHIR daftar pilihan.
+
+    Di akhir, bukan di awal: pilihan yang sebenarnya harus lebih dulu terbaca.
+    Tombol kembali adalah jalan keluar, bukan tawaran utama.
+    """
+    tombol = guided.back_choice(step)
+    return choices if tombol is None else [*choices, tombol]
+
+
 def _choices_reply(
     session: Session,
     message: str,
@@ -222,6 +232,48 @@ async def ask_question(
         if quiz_reply is not None:
             return quiz_reply
 
+        # Tombol kembali: mundur satu langkah SEBELUM menafsirkan pesan sebagai
+        # pilihan baru. Tanpa didahulukan, label tombol ("Kembali — pilih materi
+        # lain") ikut dibaca sebagai penyebutan materi dan justru maju, bukan
+        # mundur. Hanya berlaku saat chatbot memang sedang menanyakan sesuatu;
+        # di luar itu kata "kembali" bisa saja bagian dari pertanyaan biasa.
+        # Kecocokan PERSIS pada tombol yang baru ditawarkan selalu menang atas
+        # penebakan maksud. Label sokratik berbunyi "Saya balik bertanya…", dan
+        # "balik" adalah salah satu frasa tombol kembali — tanpa aturan ini,
+        # menekan tombol itu justru memundurkan alur, bukan memilih gayanya.
+        if (
+            session.awaiting
+            and guided.wants_back(body.question)
+            and not learning_styles.is_choice_label(body.question)
+        ):
+            # Klien boleh mengirim `value` tombol (nama langkah tujuan) alih-alih
+            # labelnya; kalau begitu, nilainya itu sendiri yang menentukan tujuan.
+            diminta = body.question.strip().lower()
+            tujuan = (
+                diminta if diminta in guided.BACK_TARGETS
+                else guided.previous_step(session.awaiting)
+            )
+            if tujuan is not None:
+                session.step_back_to(tujuan)
+                turn = await pipeline.guided_turn(
+                    "",                       # kosong: jangan tafsirkan ulang teksnya
+                    course_id=session.course_id,
+                    course_name=session.course_name,
+                    weeks=list(session.weeks),
+                    content_id=session.content_id,
+                    source_file=session.source_filter,
+                    style=session.style,
+                    awaiting=session.awaiting,
+                    model=body.model,
+                    tenant_id=tenant.tenant_id,
+                    allowed_courses=tenant.allowed_courses,
+                )
+                session.awaiting = turn.step
+                return _choices_reply(
+                    session, turn.message, turn.step,
+                    _with_back(list(turn.choices), turn.step),
+                )
+
         turn = await pipeline.guided_turn(
             body.question,
             course_id=session.course_id,
@@ -264,7 +316,9 @@ async def ask_question(
                         label="Kerjakan kuis materi ini", value="kuis", kind="quiz",
                     )
                 )
-            return _choices_reply(session, turn.message, turn.step, choices)
+            return _choices_reply(
+                session, turn.message, turn.step, _with_back(choices, turn.step),
+            )
 
         session.awaiting = None
 

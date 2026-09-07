@@ -23,17 +23,23 @@ from tenacity import (
 from src import model_registry
 from src.config import settings
 from src.generation.prompts import (
+    CODE_REVIEW_SYSTEM_PROMPT,
     DECOMPOSE_SYSTEM_PROMPT,
     FOLLOWUP_SYSTEM_PROMPT,
+    GRADE_SYSTEM_PROMPT,
     QUIZ_SYSTEM_PROMPT,
     STARTER_SYSTEM_PROMPT,
     WEEK_TOPIC_SYSTEM_PROMPT,
     FormattedContext,
+    build_evaluation_prompt,
     build_system_prompt,
     build_user_prompt,
     format_history,
+    parse_code_review_json,
     parse_decompose_json,
+    parse_evaluation_json,
     parse_followup_json,
+    parse_grade_json,
     parse_quiz_json,
 )
 from src.utils.logger import logger
@@ -59,6 +65,13 @@ _AUX_MAX_TOKENS = 3072
 # jatah sebelum JSON-nya sempat ditulis sehingga model mengembalikan konten kosong
 # dan pembuatan kuis selalu gagal pada model reasoning.
 _QUIZ_MAX_TOKENS = 4096
+_EVAL_MAX_TOKENS = 8192
+# Penilaian & tinjauan kode. Terukur pada Qwen 3.7: satu tinjauan kode memakai
+# ~2.900 token hanya untuk penalaran sebelum menulis JSON-nya. Dengan batas
+# penunjang 3.072, yang tersisa untuk jawabannya tinggal ~150 token — JSON
+# terpotong, parse gagal, dan butir itu ditandai "perlu tinjauan dosen" padahal
+# kodenya benar. Batas atas, bukan target: sisanya tidak ditagih.
+_REVIEW_MAX_TOKENS = 6144
 
 
 def _usage_summary(response: Any) -> str:
@@ -295,6 +308,123 @@ class LLMGenerator:
             logger.warning("Quiz generation failed: {}", exc)
             return []
         return parse_quiz_json(raw)
+
+    async def generate_evaluation(
+        self,
+        material_text: str,
+        kind_label: str,
+        range_text: str,
+        counts: dict[str, int],
+        model: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Susun soal evaluasi bercampur jenis atas materi beberapa minggu.
+
+        Mengembalikan daftar butir; kosong bila gagal. Pemanggil yang menyimpan
+        hasilnya ke cache — sebuah evaluasi harus SAMA untuk semua mahasiswa di
+        satu kelas, dan membuatnya ulang tiap permintaan berarti setiap orang
+        mengerjakan soal yang berbeda.
+        """
+        text = (material_text or "").strip()
+        if not text:
+            return []
+        messages: list[Any] = [
+            {"role": "system",
+             "content": build_evaluation_prompt(kind_label, range_text, counts)},
+            {"role": "user", "content": f"[ISI MATERI {range_text.upper()}]\n{text}"},
+        ]
+        try:
+            raw = await self._call_with_retry(
+                messages, model=model, temperature=0.3, max_tokens=_EVAL_MAX_TOKENS,
+            )
+        except Exception as exc:
+            logger.warning("Pembuatan evaluasi gagal: {}", exc)
+            return []
+        return parse_evaluation_json(raw)
+
+    async def grade_open_answer(
+        self,
+        question: str,
+        student_answer: str,
+        expected: str = "",
+        rubric: list[str] | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Nilai satu jawaban terbuka terhadap kunci atau rubrik.
+
+        None berarti penilaian tidak dapat dilakukan — panggilan gagal atau
+        keluaran tidak terbaca. Pemanggil menandainya perlu tinjauan dosen,
+        BUKAN memberinya nilai nol: kegagalan mesin bukan kesalahan mahasiswa,
+        dan memberi nol diam-diam adalah kerugian yang tidak terlihat.
+        """
+        jawaban = (student_answer or "").strip()
+        if not jawaban:
+            return {"skor": 0.0, "benar": False, "ragu": False,
+                    "feedback": "Belum ada jawaban."}
+
+        bagian = [f"[SOAL]\n{question}"]
+        if expected:
+            bagian.append(f"[KUNCI JAWABAN]\n{expected}")
+        if rubric:
+            bagian.append("[RUBRIK]\n" + "\n".join(f"- {r}" for r in rubric))
+        bagian.append(f"[JAWABAN MAHASISWA]\n{jawaban}")
+
+        messages: list[Any] = [
+            {"role": "system", "content": GRADE_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(bagian)},
+        ]
+        try:
+            raw = await self._call_with_retry(
+                messages, model=model, temperature=0.1, max_tokens=_REVIEW_MAX_TOKENS,
+            )
+        except Exception as exc:
+            logger.warning("Penilaian jawaban terbuka gagal: {}", exc)
+            return None
+        return parse_grade_json(raw)
+
+    async def review_code(
+        self,
+        prompt: str,
+        code: str,
+        expected_behavior: str = "",
+        rubric: list[str] | None = None,
+        test_cases: list[dict] | None = None,
+        model: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Tinjau program mahasiswa: benar atau belum, dan di mana kelirunya.
+
+        Kode TIDAK dijalankan di mana pun — model diminta menalar alurnya dengan
+        membaca. Kasus uji disertakan sebagai bahan penalaran, bukan dieksekusi.
+
+        None berarti tinjauan gagal; pemanggil menandainya perlu ditinjau dosen.
+        """
+        if not (code or "").strip():
+            return None
+
+        bagian = [f"[SOAL]\n{prompt}"]
+        if expected_behavior:
+            bagian.append(f"[PERILAKU YANG DIHARAPKAN]\n{expected_behavior}")
+        if test_cases:
+            contoh = "\n".join(
+                f"- masukan: {tc.get('input')!r} -> keluaran: {tc.get('output')!r}"
+                for tc in test_cases[:8]
+            )
+            bagian.append(f"[KASUS UJI YANG HARUS TERPENUHI]\n{contoh}")
+        if rubric:
+            bagian.append("[RUBRIK]\n" + "\n".join(f"- {r}" for r in rubric))
+        bagian.append(f"[KODE MAHASISWA]\n```\n{code}\n```")
+
+        messages: list[Any] = [
+            {"role": "system", "content": CODE_REVIEW_SYSTEM_PROMPT},
+            {"role": "user", "content": "\n\n".join(bagian)},
+        ]
+        try:
+            raw = await self._call_with_retry(
+                messages, model=model, temperature=0.1, max_tokens=_REVIEW_MAX_TOKENS,
+            )
+        except Exception as exc:
+            logger.warning("Tinjauan kode gagal: {}", exc)
+            return None
+        return parse_code_review_json(raw)
 
     @staticmethod
     def _build_user_content(

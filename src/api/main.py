@@ -19,14 +19,18 @@ from src.api.middleware import (
     SecurityHeadersMiddleware,
 )
 from src.api.routes import (
+    admin,
     batch,
     browse,
     catalog,
     chat,
     conversations,
+    evaluation,
+    livecode,
     models,
     styles,
     upload,
+    validation,
 )
 from src.config import settings
 from src.ingestion.nltk_data import warn_if_missing
@@ -130,7 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(
     title="RAGAcademic",
     description="Multimodal RAG chatbot untuk materi kuliah (multi-tenant)",
-    version="0.4.0",
+    version="0.5.0",
     lifespan=lifespan,
     # Dokumentasi interaktif memerikan seluruh permukaan API. Di produksi ia
     # dimatikan: nilainya bagi tim integrasi tidak sebanding dengan peta gratis
@@ -175,7 +179,20 @@ app.include_router(catalog.router, dependencies=_auth)
 app.include_router(models.router, dependencies=_auth)
 app.include_router(styles.router, dependencies=_auth)
 app.include_router(conversations.router, dependencies=_auth)
+app.include_router(evaluation.router, dependencies=_auth)
+app.include_router(livecode.router, dependencies=_auth)
+app.include_router(validation.router, dependencies=_auth)
 app.include_router(chat.router, dependencies=_auth)
+
+# Pengelolaan tenant sengaja TIDAK didaftarkan kecuali dinyalakan eksplisit.
+# Endpoint ini dapat menerbitkan kunci untuk tenant mana pun; kebocorannya
+# membuka SELURUH pelanggan sekaligus, bukan satu.
+if settings.enable_admin_api:
+    logger.warning(
+        "ADMIN API AKTIF di /admin — pastikan instance ini tidak terjangkau "
+        "dari internet dan hanya kunci ber-hak 'admin:tenants' yang beredar."
+    )
+    app.include_router(admin.router, dependencies=_auth)
 
 
 @app.get("/health", tags=["meta"])

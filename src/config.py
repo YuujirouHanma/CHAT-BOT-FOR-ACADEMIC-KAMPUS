@@ -52,6 +52,13 @@ class Settings(BaseSettings):
     # mengakses data tenant lain. Keduanya harus ditolak, bukan didiamkan.
     enforce_tenant_body_match: bool = True
 
+    # --- Admin API (kelola tenant lewat HTTP) ---
+    # MATI secara bawaan, dan itu disengaja. Endpoint ini dapat menerbitkan
+    # kunci untuk tenant MANA PUN — ia yang paling berbahaya di seluruh layanan.
+    # Nyalakan hanya pada instance terpisah yang tidak terjangkau dari internet,
+    # bukan pada instance yang sama dengan yang melayani mahasiswa.
+    enable_admin_api: bool = False
+
     # --- Enkripsi data pribadi (student_id) ---
     encrypt_pii: bool = False
     pii_kek: SecretStr = SecretStr("")     # base64url 32 byte; dev saja, produksi pakai KMS

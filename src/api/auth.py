@@ -39,6 +39,7 @@ from src.tenancy import (
     SCOPE_CONTENT_WRITE,
     SCOPE_CONVERSATION_DELETE,
     SCOPE_CONVERSATION_READ,
+    SCOPE_VALIDATE,
     TenantContext,
     TenantQuota,
 )
@@ -85,7 +86,11 @@ def _dev_tenant() -> TenantContext:
     return TenantContext(
         tenant_id=settings.dev_anonymous_tenant,
         name="Pengembangan lokal",
-        scopes=frozenset(ALL_SCOPES),
+        # Seluruh hak KECUALI pengelolaan tenant. Tenant dadakan ini lahir tanpa
+        # kredensial apa pun; memberinya hak menerbitkan kunci berarti siapa pun
+        # yang menjangkau port ini dapat membuat kunci untuk tenant mana pun —
+        # tepat pada pemasangan yang paling mungkin lupa dikonfigurasi.
+        scopes=frozenset(ALL_SCOPES - {SCOPE_ADMIN}),
         quota=TenantQuota(),
         key_id="dev",
     )
@@ -288,4 +293,5 @@ tenant_content_read = require_scope(SCOPE_CONTENT_READ)
 tenant_content_write = require_scope(SCOPE_CONTENT_WRITE)
 tenant_conversation_read = require_scope(SCOPE_CONVERSATION_READ)
 tenant_conversation_delete = require_scope(SCOPE_CONVERSATION_DELETE)
+tenant_validate = require_scope(SCOPE_VALIDATE)
 tenant_admin = require_scope(SCOPE_ADMIN)

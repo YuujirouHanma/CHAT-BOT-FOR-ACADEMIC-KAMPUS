@@ -9,8 +9,10 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from src import evaluation as evaluation_mod
 from src import gen_cache, guided, learning_styles
-from src.catalog import humanize_course, resolve_course_week
+from src import livecode as livecode_mod
+from src.catalog import display_name, resolve_course_week
 from src.config import settings
 from src.generation.llm import LLMGenerator
 from src.generation.prompts import format_retrieval_results
@@ -71,7 +73,7 @@ def _course_name(courses: list[dict], course_id: str) -> str:
     for c in courses:
         if c.get("course_id") == course_id and c.get("course_name"):
             return c["course_name"]
-    return humanize_course(course_id) or course_id
+    return display_name(course_id) or course_id
 
 
 class RAGPipeline:
@@ -361,7 +363,15 @@ class RAGPipeline:
 
         # Pertanyaan sungguhan selalu dijawab — mahasiswa tetap bisa memakai ini
         # seperti chatbot biasa, dengan atau tanpa memilih materi lebih dulu.
-        if guided.looks_like_question(question):
+        # Klik tombol gaya belajar bukan pertanyaan. Diperiksa LEBIH DULU karena
+        # dua labelnya ("Lewat contoh & kode …", "Poin-poin ringkas …") panjang
+        # dan berisi banyak kata isi, sehingga lolos sebagai pertanyaan lalu
+        # dijawab sungguhan — mahasiswa menunggu dua menit untuk jawaban atas
+        # teks tombol yang baru saja ia tekan.
+        memilih_gaya = learning_styles.is_choice_label(question) or (
+            awaiting == guided.STEP_STYLE and learning_styles.match(question) is not None
+        )
+        if guided.looks_like_question(question) and not memilih_gaya:
             return GuidedTurn(step=guided.STEP_ANSWER, answer_question=True, **ctx)
 
         step = guided.next_step(
@@ -439,7 +449,7 @@ class RAGPipeline:
                 message=guided.prompt_for(step, source_file=cur_sf),
                 choices=[
                     guided.Choice(
-                        label=f"{s.label} — {s.description}", value=s.key, kind="style",
+                        label=learning_styles.choice_label(s), value=s.key, kind="style",
                     )
                     for s in learning_styles.all_styles()
                 ],
@@ -552,6 +562,209 @@ class RAGPipeline:
         if quiz:
             gen_cache.save("quiz", content_id, source_file, quiz, tenant_id=tenant_id)
         return quiz
+
+    async def evaluation(
+        self,
+        course_id: str,
+        plan: evaluation_mod.EvaluationPlan,
+        *,
+        tenant_id: str,
+        model: str | None = None,
+    ) -> list[dict]:
+        """Soal evaluasi atas rentang minggu sebuah mata kuliah.
+
+        Di-cache per (tenant, mata kuliah, rentang minggu, komposisi soal).
+        Cache di sini bukan sekadar penghematan biaya: satu evaluasi harus SAMA
+        untuk seluruh mahasiswa di satu kelas. Tanpa cache, setiap orang
+        mengerjakan soal yang berbeda dan nilainya tidak dapat dibandingkan —
+        yang mematikan seluruh gunanya sebagai alat ukur penelitian.
+        """
+        require_tenant_id(tenant_id, operation="evaluation")
+        if not course_id:
+            return []
+
+        kunci = (
+            f"{plan.kind}::{'-'.join(str(w) for w in plan.weeks_covered)}"
+            f"::{'-'.join(f'{t}{n}' for t, n in sorted(plan.blueprint.counts.items()))}"
+        )
+        cached = gen_cache.load("evaluation", course_id, kunci, tenant_id=tenant_id)
+        if cached is not None:
+            return cached
+
+        teks = await self._store.get_week_text(
+            course_id, list(plan.weeks_covered), max_chars=12_000,
+            tenant_id=tenant_id,
+        )
+        if not teks:
+            logger.warning(
+                "Evaluasi {} untuk {} {} dibatalkan: tidak ada materi terindeks",
+                plan.kind, course_id, plan.range_text,
+            )
+            return []
+
+        soal = await self._generator.generate_evaluation(
+            teks, plan.label, plan.range_text, plan.blueprint.counts, model=model,
+        )
+        if soal:
+            gen_cache.save(
+                "evaluation", course_id, kunci, soal, tenant_id=tenant_id,
+            )
+        return soal
+
+    async def grade_evaluation(
+        self,
+        items: list[dict],
+        answers: list,
+        *,
+        tenant_id: str,
+        model: str | None = None,
+    ) -> dict:
+        """Nilai satu evaluasi bercampur jenis soal.
+
+        Soal objektif dinilai mesin — pasti, seketika, tanpa biaya. Sisanya
+        dinilai LLM terhadap kunci/rubrik. Butir yang LLM ragu atau gagal
+        dinilai ditandai `perlu_tinjauan`, bukan diberi nol diam-diam.
+        """
+        require_tenant_id(tenant_id, operation="grade_evaluation")
+        hasil: list[evaluation_mod.GradedItem] = []
+
+        for i, butir in enumerate(items):
+            jawaban = answers[i] if i < len(answers) else None
+
+            if not evaluation_mod.needs_llm_grading(butir):
+                hasil.append(evaluation_mod.grade_objective(butir, jawaban, i))
+                continue
+
+            nilai = await self._generator.grade_open_answer(
+                question=butir.get("question", ""),
+                student_answer=str(jawaban or ""),
+                expected=butir.get("expected_answer", "")
+                         or butir.get("expected_behavior", ""),
+                rubric=butir.get("rubric") or butir.get("key_points") or [],
+                model=model,
+            )
+            ragu = nilai is None or nilai.get("ragu", False)
+            hasil.append(evaluation_mod.GradedItem(
+                index=i,
+                type=butir.get("type", "esai"),
+                question=butir.get("question", ""),
+                student_answer=jawaban,
+                correct_answer=butir.get("expected_answer")
+                               or butir.get("expected_behavior") or "",
+                # None = belum dapat dipastikan; dosen yang memutuskan.
+                is_correct=None if ragu else bool((nilai or {}).get("benar")),
+                score=float((nilai or {}).get("skor", 0.0)),
+                explanation=butir.get("explanation", ""),
+                feedback=(nilai or {}).get(
+                    "feedback", "Perlu ditinjau dosen — penilaian otomatis gagal.",
+                ),
+            ))
+
+        ringkas = evaluation_mod.summarize(hasil)
+        ringkas["butir"] = [
+            {
+                "index": g.index, "type": g.type, "question": g.question,
+                "your_answer": g.student_answer, "correct_answer": g.correct_answer,
+                "is_correct": g.is_correct, "score": round(g.score, 2),
+                "explanation": g.explanation, "feedback": g.feedback,
+            }
+            for g in hasil
+        ]
+        return ringkas
+
+    async def livecode_exercises(
+        self,
+        course_id: str,
+        weeks: list[int],
+        *,
+        tenant_id: str,
+        count: int = 3,
+        model: str | None = None,
+    ) -> list[livecode_mod.Exercise]:
+        """Latihan koding yang diturunkan dari materi minggu tertentu.
+
+        Memakai jalur pembuatan soal yang sama dengan evaluasi, dengan komposisi
+        khusus koding. Menyatukannya disengaja: soal koding di ETS dan latihan
+        mandiri adalah hal yang sama bagi mahasiswa, dan membuatnya lewat dua
+        jalur berbeda akan melahirkan dua standar soal yang berbeda pula.
+        """
+        require_tenant_id(tenant_id, operation="livecode_exercises")
+        if not (course_id and weeks):
+            return []
+
+        plan = evaluation_mod.custom_plan(
+            weeks, "kuis", {"koding": max(1, min(count, 10))},
+        )
+        butir = await self.evaluation(
+            course_id, plan, tenant_id=tenant_id, model=model,
+        )
+        return [
+            livecode_mod.exercise_from_item(
+                b, course_id=course_id, week=plan.weeks_covered[-1], index=i,
+            )
+            for i, b in enumerate(butir)
+            if b.get("type") == "koding"
+        ]
+
+    async def grade_livecode(
+        self,
+        exercise: livecode_mod.Exercise,
+        code: str,
+        *,
+        tenant_id: str,
+        student_id: str | None = None,
+        session_id: str | None = None,
+        model: str | None = None,
+    ) -> dict:
+        """Nilai satu kiriman kode: analisis statis dulu, LLM hanya bila perlu.
+
+        Urutannya menentukan. Galat sintaks dan fungsi yang belum didefinisikan
+        sudah pasti tanpa perlu penalaran apa pun — memanggil LLM untuk itu
+        membuang biaya dan waktu tunggu mahasiswa, sekaligus berisiko
+        menghasilkan diagnosis yang lebih kabur daripada pesan galat Python
+        yang sudah menyebut nomor barisnya.
+        """
+        require_tenant_id(tenant_id, operation="grade_livecode")
+
+        temuan, layak_llm = livecode_mod.analyze_code(code, exercise)
+        memblokir = livecode_mod.has_blocking_error(temuan)
+
+        tinjauan: dict | None = None
+        if layak_llm and not memblokir:
+            tinjauan = await self._generator.review_code(
+                prompt=exercise.prompt,
+                code=code,
+                expected_behavior=exercise.expected_behavior,
+                rubric=list(exercise.rubric),
+                test_cases=list(exercise.test_cases),
+                model=model,
+            )
+
+        ragu = (not memblokir) and (tinjauan is None or tinjauan.get("ragu", False))
+        hasil = {
+            "exercise_id": exercise.exercise_id,
+            # Lulus hanya bila tidak ada galat statis DAN tinjauan menyatakan lulus.
+            "lulus": bool(tinjauan and tinjauan.get("lulus")) and not memblokir,
+            "skor": 0.0 if memblokir else float((tinjauan or {}).get("skor", 0.0)),
+            "temuan": [t.as_dict() for t in temuan],
+            "ringkasan": (
+                "Kode belum bisa dinilai — perbaiki dulu yang ditandai di atas."
+                if memblokir
+                else (tinjauan or {}).get(
+                    "ringkasan", "Belum dapat ditinjau otomatis.",
+                )
+            ),
+            "benar": (tinjauan or {}).get("benar", []),
+            "keliru": (tinjauan or {}).get("keliru", []),
+            "petunjuk": (tinjauan or {}).get("petunjuk", []),
+            "perlu_tinjauan_dosen": ragu,
+        }
+
+        hasil["submission_id"] = livecode_mod.record_submission(
+            tenant_id=tenant_id, exercise_id=exercise.exercise_id,
+            student_id=student_id, code=code, result=hasil, session_id=session_id,
+        )
+        return hasil
 
     async def grade_quiz(
         self,
