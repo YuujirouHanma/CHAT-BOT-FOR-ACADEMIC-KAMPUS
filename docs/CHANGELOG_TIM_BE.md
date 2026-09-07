@@ -2,7 +2,7 @@
 
 **Untuk:** tim Back-End / Front-End yang memanggil layanan RAGAcademic
 **Sejak:** integrasi awal 1 Juli 2026 (`API_INTEGRATION.md` versi pertama)
-**Per:** 20 Agustus 2026 — layanan versi 0.4.0 (**multi-tenant**)
+**Per:** 4 September 2026 — layanan versi 0.5.0
 **Kontrak terbaru:** `docs/api/openapi.json`
 **Rincian keamanan:** `docs/SECURITY.md`
 
@@ -158,12 +158,110 @@ Supaya jelas apa yang tidak perlu disentuh:
 
 ---
 
+## 🟢 0b. VERSI 0.5.0 — EVALUASI, VALIDASI DOSEN, LATIHAN KODING
+
+Sepuluh endpoint baru. **Tidak ada yang memutus kompatibilitas** — seluruh
+endpoint lama tetap sama persis. Kalau belum siap memakai yang baru, tidak ada
+yang perlu diubah.
+
+Kontrak mesinnya sudah diregenerasi: `docs/api/openapi.json`, kini 27 endpoint.
+
+### Evaluasi berkala — kuis, ETS, EAS
+
+Berbeda dari kuis materi yang sudah ada (menguji SATU berkas), evaluasi
+mencakup beberapa minggu sekaligus dan soalnya bercampur jenis.
+
+| Endpoint | Guna |
+|---|---|
+| `GET /evaluation/schedule` | jadwal evaluasi satu semester |
+| `POST /evaluation/questions` | ambil soal (tanpa kunci jawaban) |
+| `POST /evaluation/submit` | kirim jawaban, dapat nilai + pembahasan |
+
+Jadwal bawaan — perhatikan ETS/EAS bersifat **kumulatif**:
+
+| Minggu | Jenis | Cakupan | Soal |
+|---|---|---|---|
+| 4 | Kuis | minggu 1-4 | 8 |
+| 8 | ETS | minggu 1-8 | 17 |
+| 12 | Kuis | minggu 9-12 | 8 |
+| 16 | EAS | minggu 9-16 | 19 |
+
+Rentang bebas juga bisa: kirim `weeks: [5,6,7]` alih-alih `week`.
+
+**Lima jenis soal:** `pilihan_ganda`, `benar_salah`, `isian_singkat`, `esai`,
+`koding`. Klien perlu merender jawaban berupa TEKS untuk tiga jenis terakhir,
+bukan hanya tombol pilihan.
+
+Dua hal yang perlu ditangani klien:
+- **`is_correct` bisa `null`** — artinya penilaian otomatis ragu dan butir itu
+  menunggu tinjauan dosen. Jangan ditampilkan sebagai "salah".
+- **`per_jenis`** memecah skor menurut jenis soal. Berguna ditampilkan: nilai
+  total yang sama bisa berarti dua hal berbeda.
+
+### Validasi dosen
+
+| Endpoint | Guna |
+|---|---|
+| `GET /validation/answers` | antrean jawaban AI yang belum ditinjau |
+| `POST /validation/answers/{interaction_id}` | putusan dosen |
+| `GET /validation/stats` | ringkasan + angka akurasi |
+
+Butuh hak **`answer:validate`**, yang sengaja TIDAK ada pada kunci aplikasi
+mahasiswa. Minta kunci dosen terpisah ke tim AI.
+
+Putusan: `sesuai` / `perlu_perbaikan` / `tidak_sesuai`. Dua yang terakhir
+**wajib disertai `catatan`** — kalau kosong, dibalas `400`.
+
+### Latihan koding (livecode)
+
+| Endpoint | Guna |
+|---|---|
+| `POST /livecode/exercises` | latihan dari materi minggu tertentu |
+| `POST /livecode/submit` | kirim kode, dapat koreksi |
+| `GET /livecode/submissions` | riwayat kiriman |
+| `GET /livecode/stats` | statistik percobaan |
+
+**Kode mahasiswa tidak dijalankan di server.** Penilaian memakai analisis
+statis (sintaks, fungsi wajib, konstruksi terlarang) ditambah tinjauan LLM.
+Kalau nanti butuh eksekusi sungguhan, jalurnya Pyodide di peramban atau
+kontainer terisolasi — bukan di server ini.
+
+Balasan `POST /livecode/submit` disusun bertingkat, dan urutannya disengaja:
+
+```json
+{
+  "lulus": false, "skor": 0.6,
+  "temuan":   [{"severity":"peringatan","message":"...","line":3}],
+  "benar":    ["struktur perulangan sudah tepat"],
+  "keliru":   [{"baris":3,"masalah":"batas range","akibat":"hasil kurang 1"}],
+  "petunjuk": ["periksa batas atas range"],
+  "perlu_tinjauan_dosen": false
+}
+```
+
+Tampilkan `benar` LEBIH DULU. Mahasiswa pemula yang hanya menerima daftar
+kesalahan cenderung berhenti mencoba. `petunjuk` sengaja tidak memuat kode
+perbaikan yang lengkap — menyodorkan jawaban menghapus proses belajarnya.
+
+### Tombol kembali pada alur terpandu
+
+`choices` kini bisa memuat `kind: "back"`. Nilainya adalah nama langkah TUJUAN
+(`course` / `week` / `material` / `style`). Render seperti pilihan lain; klien
+yang belum menanganinya tetap jalan, mahasiswa hanya tidak punya jalan mundur.
+
+
+---
+
 ## RINGKAS: yang wajib dikerjakan tim BE
+
+> **Bagian ini dan seterusnya ditulis untuk versi 0.3.0 (Agustus).** Isinya masih
+> berlaku, KECUALI soal autentikasi — itu berubah total di 0.4.0. Untuk kunci API,
+> ikuti **bagian 0 di atas**, bukan bagian 5 di bawah.
 
 | Prioritas | Tindakan | Alasan |
 |---|---|---|
 | **1 — WAJIB** | Tangani field `mode` pada respons `POST /chat/ask`, **atau** kirim `"guided": false` | Tanpa ini, pengguna bisa menemui pesan chatbot yang menunggu jawaban pilihan padahal tombolnya tidak dirender |
-| **2 — WAJIB sebelum produksi** | Pastikan `RAGACADEMIC_API_KEY` terisi dan kirim header `X-API-Key` | Auth sedang dimatikan untuk pengembangan; di `APP_ENV=production` server menolak start bila key kosong |
+| **2 — WAJIB sebelum produksi** | ~~Isi `RAGACADEMIC_API_KEY`~~ → **Ganti ke kunci per tenant `ragk_...`** (lihat bagian 0) | Sejak 0.4.0 kunci global warisan DITOLAK di produksi — server menolak start bila kunci itu masih terisi |
 | 3 — WAJIB bila memakai guided | Tangani `step: "style"` dan `kind: "style"` | Langkah baru pada alur; klien yang tidak mengenalinya akan menampilkan pertanyaan tanpa tombol |
 | 4 — Disarankan | Baca `context.weeks` (daftar), bukan `context.week` | Mahasiswa kini boleh memilih beberapa minggu sekaligus |
 | 5 — Disarankan | Kirim `course_id`, `course_name`, `week` saat upload, atau ikuti pola `content_id` = `<matkul>-minggu-<n>` | Menentukan apakah materi muncul di navigasi mata kuliah → minggu → materi |
@@ -420,14 +518,21 @@ Semua daftar di atas diturunkan dari materi yang **benar-benar terindeks**, sehi
 
 ## 5. Autentikasi
 
-`RAGACADEMIC_API_KEY` **sedang dikosongkan** di lingkungan pengembangan, sehingga API dapat diakses tanpa header `X-API-Key`. Ini disengaja untuk mempermudah pengujian.
+> ⚠️ **Bagian ini sudah tidak berlaku sejak versi 0.4.0.** Lihat **bagian 0 → "1 —
+> Kunci API per tenant"** di bagian atas dokumen ini.
 
-Sebelum produksi:
+Ringkas perubahannya: satu kunci global `RAGACADEMIC_API_KEY` diganti **kunci per
+tenant** berbentuk `ragk_<id>.<rahasia>`. Kunci itulah yang menentukan data kampus
+mana yang kalian akses — bukan `tenant_id` yang dikirim di body.
 
-1. Isi `RAGACADEMIC_API_KEY` di `.env`.
-2. Kirim header `X-API-Key` pada setiap permintaan.
+Kunci global warisan masih dikenali di lingkungan pengembangan agar integrasi lama
+tidak putus, tetapi **ditolak di produksi**: server menolak start bila kunci itu
+masih terisi, karena satu kunci untuk semua pelanggan tidak dapat membedakan siapa
+pun sehingga isolasi antar kampus tidak mungkin ditegakkan.
 
-Server kini **menolak start** bila `APP_ENV=production` sementara key kosong, sehingga konfigurasi pengembangan tidak mungkin terbawa diam-diam.
+Minta kunci untuk kampus kalian ke tim AI. Satu kampus bisa punya beberapa kunci
+dengan hak berbeda — misalnya satu untuk sistem akademik (boleh mengunggah materi)
+dan satu untuk aplikasi mahasiswa (hanya boleh bertanya).
 
 ---
 

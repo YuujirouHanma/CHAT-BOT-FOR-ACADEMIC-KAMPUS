@@ -103,6 +103,14 @@ data/tenants/
 # Jejak audit — alamat IP, pola pemakaian, dan identitas kunci tiap tenant.
 data/audit/
 
+# Kiriman kode mahasiswa beserta hasil penilaiannya — karya dan data belajar
+# orang, bukan kode proyek.
+data/livecode/
+
+# Putusan dosen atas jawaban AI. Memuat penilaian bernama terhadap materi
+# sebuah kampus; ia data pelanggan, bukan bagian dari perangkat lunaknya.
+data/validation/
+
 # Local tool & editor settings
 .claude/
 pyrightconfig.json

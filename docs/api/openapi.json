@@ -2,8 +2,8 @@
   "openapi": "3.1.0",
   "info": {
     "title": "RAGAcademic",
-    "description": "Multimodal RAG chatbot untuk materi kuliah",
-    "version": "0.3.0"
+    "description": "Multimodal RAG chatbot untuk materi kuliah (multi-tenant)",
+    "version": "0.5.0"
   },
   "paths": {
     "/documents/upload": {
@@ -12,7 +12,7 @@
           "documents"
         ],
         "summary": "Upload Document",
-        "description": "Upload a document, save to storage/{content_id}/, and index.\n\nIf content_id given â†’ saved under storage/{content_id}/{filename}.\nOtherwise â†’ saved to data/uploads/ with UUID prefix.\n\ncourse_id / course_name / week are optional â€” they power the guided catalog\n(mata kuliah â†’ minggu â†’ materi). If omitted they are derived from content_id\n(e.g. \"sbd-minggu-2\" â†’ course \"sbd\", week 2).",
+        "description": "Upload a document, save to storage/{tenant_id}/{content_id}/, and index.\n\nIf content_id given → saved under storage/{tenant}/{content_id}/{filename}.\nOtherwise → saved to storage/{tenant}/_uploads/ with UUID prefix.\n\ncourse_id / course_name / week are optional — they power the guided catalog\n(mata kuliah → minggu → materi). If omitted they are derived from content_id\n(e.g. \"sbd-minggu-2\" → course \"sbd\", week 2).",
         "operationId": "upload_document_documents_upload_post",
         "requestBody": {
           "content": {
@@ -59,7 +59,7 @@
           "documents"
         ],
         "summary": "Index Batch",
-        "description": "Index all indexable documents in storage/{content_id}/.\n\nNon-indexable files (video, audio, images) are silently skipped.",
+        "description": "Index all indexable documents in storage/{tenant_id}/{content_id}/.\n\nNon-indexable files (video, audio, images) are silently skipped.",
         "operationId": "index_batch_documents_index_batch_post",
         "requestBody": {
           "content": {
@@ -106,6 +106,7 @@
           "browse"
         ],
         "summary": "Get Contents",
+        "description": "Seluruh content_id MILIK TENANT INI.\n\nSebelumnya endpoint ini membacakan isi direktori penyimpanan apa adanya —\ndaftar lengkap materi setiap pelanggan kepada siapa pun yang memegang kunci.",
         "operationId": "get_contents_browse_contents_get",
         "responses": {
           "200": {
@@ -132,7 +133,7 @@
           "browse"
         ],
         "summary": "Get Files",
-        "description": "List ALL files for a content_id â€” documents, videos, audio, etc.\nDocuments get an `indexed` flag from Qdrant.",
+        "description": "List ALL files for a content_id — documents, videos, audio, etc.\nDocuments get an `indexed` flag from Qdrant.",
         "operationId": "get_files_browse_contents__content_id__files_get",
         "security": [
           {
@@ -180,7 +181,7 @@
           "catalog"
         ],
         "summary": "Get Courses",
-        "description": "Step 1 â€” daftar mata kuliah yang punya materi terindex.",
+        "description": "Step 1 — daftar mata kuliah milik tenant ini yang punya materi terindex.",
         "operationId": "get_courses_catalog_courses_get",
         "responses": {
           "200": {
@@ -207,7 +208,7 @@
           "catalog"
         ],
         "summary": "Get Weeks",
-        "description": "Step 2 â€” minggu yang tersedia untuk satu mata kuliah (auto-update).",
+        "description": "Step 2 — minggu yang tersedia untuk satu mata kuliah (auto-update).",
         "operationId": "get_weeks_catalog_courses__course_id__weeks_get",
         "security": [
           {
@@ -255,7 +256,7 @@
           "catalog"
         ],
         "summary": "Get Materials",
-        "description": "Step 3 â€” daftar materi (dokumen) untuk satu minggu.",
+        "description": "Step 3 — daftar materi (dokumen) untuk satu minggu.",
         "operationId": "get_materials_catalog_courses__course_id__weeks__week__materials_get",
         "security": [
           {
@@ -312,7 +313,7 @@
           "catalog"
         ],
         "summary": "Get Starter Questions",
-        "description": "Step 4 â€” pertanyaan template untuk satu materi (auto-generate + cache).\n\n`model` (query param) opsional â€” key model dari /models untuk memilih LLM.",
+        "description": "Step 4 — pertanyaan template untuk satu materi (auto-generate + cache).\n\n`model` (query param) opsional — key model dari /models untuk memilih LLM.",
         "operationId": "get_starter_questions_catalog_materials__content_id___source_file__starter_questions_get",
         "security": [
           {
@@ -458,7 +459,7 @@
           "catalog"
         ],
         "summary": "Submit Quiz",
-        "description": "Nilai jawaban kuis mahasiswa â†’ skor + pembahasan per soal, dan simpan progres.\n\n`answers` = indeks opsi (0-3) yang dipilih, urut sesuai soal dari GET .../quiz.",
+        "description": "Nilai jawaban kuis mahasiswa → skor + pembahasan per soal, dan simpan progres.\n\n`answers` = indeks opsi (0-3) yang dipilih, urut sesuai soal dari GET .../quiz.",
         "operationId": "submit_quiz_catalog_materials__content_id___source_file__quiz_submit_post",
         "security": [
           {
@@ -591,16 +592,17 @@
             "schema": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 128
                 },
                 {
                   "type": "null"
                 }
               ],
-              "description": "Saring hanya percakapan milik mahasiswa ini. Tanpa ini, seluruh percakapan dikembalikan.",
+              "description": "Saring hanya percakapan milik mahasiswa ini. Tanpa ini, seluruh percakapan MILIK TENANT INI dikembalikan.",
               "title": "Student Id"
             },
-            "description": "Saring hanya percakapan milik mahasiswa ini. Tanpa ini, seluruh percakapan dikembalikan."
+            "description": "Saring hanya percakapan milik mahasiswa ini. Tanpa ini, seluruh percakapan MILIK TENANT INI dikembalikan."
           },
           {
             "name": "limit",
@@ -645,7 +647,7 @@
           "conversations"
         ],
         "summary": "Get Conversation",
-        "description": "Isi lengkap sebuah percakapan, siap ditampilkan ulang apa adanya.\n\nTranskrip memuat langkah navigasi juga (pilihan mata kuliah, minggu, materi),\nsupaya tampilannya persis seperti saat percakapan berlangsung.",
+        "description": "Isi lengkap sebuah percakapan, siap ditampilkan ulang apa adanya.\n\nTranskrip memuat langkah navigasi juga (pilihan mata kuliah, minggu, materi),\nsupaya tampilannya persis seperti saat percakapan berlangsung.\n\nPercakapan milik tenant lain dibalas 404, bukan 403. Membedakan keduanya\nmemberi tahu pemanggil bahwa sebuah `conversation_id` memang ada di sistem —\ncukup untuk memetakan id yang valid lewat percobaan berulang.",
         "operationId": "get_conversation_conversations__conversation_id__get",
         "security": [
           {
@@ -691,7 +693,7 @@
           "conversations"
         ],
         "summary": "Delete Conversation",
-        "description": "Hapus permanen. Session di memori ikut dibuang agar tidak tertulis ulang.\n\nTanpa membuang salinan di memori, permintaan berikutnya dengan `session_id`\nyang sama akan menyimpannya kembali ke disk â€” dan percakapan yang sudah\ndihapus mahasiswa muncul lagi.",
+        "description": "Hapus permanen. Session di memori ikut dibuang agar tidak tertulis ulang.\n\nTanpa membuang salinan di memori, permintaan berikutnya dengan `session_id`\nyang sama akan menyimpannya kembali ke disk — dan percakapan yang sudah\ndihapus mahasiswa muncul lagi.\n\nPenghapusan dibatasi pada direktori tenant pemanggil, sehingga sebuah id\nmilik tenant lain hanya menghasilkan 404 — bukan menghapus data orang lain.",
         "operationId": "delete_conversation_conversations__conversation_id__delete",
         "security": [
           {
@@ -712,6 +714,551 @@
         "responses": {
           "204": {
             "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/evaluation/schedule": {
+      "get": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Get Schedule",
+        "description": "Jadwal evaluasi satu semester beserta cakupan minggunya.",
+        "operationId": "get_schedule_evaluation_schedule_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationScheduleResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/evaluation/questions": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Get Questions",
+        "description": "Soal evaluasi untuk sebuah mata kuliah.\n\nKunci jawaban TIDAK disertakan — hanya soal dan opsinya. Mengirimkan kunci\nke klien berarti mahasiswa mana pun yang membuka panel jaringan peramban\ndapat membacanya sebelum menjawab.",
+        "operationId": "get_questions_evaluation_questions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluationQuestionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationQuestionsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/evaluation/submit": {
+      "post": {
+        "tags": [
+          "evaluation"
+        ],
+        "summary": "Submit",
+        "description": "Nilai jawaban mahasiswa atas sebuah evaluasi.\n\nDinilai terhadap soal yang SAMA dengan yang diterima mahasiswa — soalnya\ndiambil dari cache, bukan disusun ulang.",
+        "operationId": "submit_evaluation_submit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluationSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluationSubmitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/livecode/exercises": {
+      "post": {
+        "tags": [
+          "livecode"
+        ],
+        "summary": "Get Exercises",
+        "description": "Latihan koding yang diturunkan dari materi minggu tertentu.",
+        "operationId": "get_exercises_livecode_exercises_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LivecodeExercisesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivecodeExercisesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/livecode/submit": {
+      "post": {
+        "tags": [
+          "livecode"
+        ],
+        "summary": "Submit Code",
+        "description": "Kirim kode, dapatkan koreksi.\n\nUmpan baliknya bertingkat: apa yang sudah benar, di mana yang keliru, lalu\npetunjuk. Kode perbaikan yang lengkap sengaja TIDAK diberikan — menyodorkan\njawaban menyelesaikan soalnya, tetapi menghapus proses belajarnya.",
+        "operationId": "submit_code_livecode_submit_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LivecodeSubmitRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivecodeSubmitResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ]
+      }
+    },
+    "/livecode/submissions": {
+      "get": {
+        "tags": [
+          "livecode"
+        ],
+        "summary": "Get Submissions",
+        "description": "Riwayat kiriman, terbaru lebih dulu.\n\nKiriman yang GAGAL ikut tersimpan dan ditampilkan — berapa kali seorang\nmahasiswa mencoba sebelum berhasil justru data paling berguna untuk menilai\napakah sebuah gaya belajar benar-benar membantu.",
+        "operationId": "get_submissions_livecode_submissions_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "student_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Student Id"
+            }
+          },
+          {
+            "name": "exercise_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 256
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Exercise Id"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivecodeSubmissionListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/livecode/stats": {
+      "get": {
+        "tags": [
+          "livecode"
+        ],
+        "summary": "Get Stats",
+        "description": "Statistik percobaan sebuah latihan.",
+        "operationId": "get_stats_livecode_stats_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "exercise_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 256,
+              "title": "Exercise Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LivecodeStatsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/validation/answers": {
+      "get": {
+        "tags": [
+          "validation"
+        ],
+        "summary": "List Answers",
+        "description": "Jawaban AI beserta status validasinya, terbaru lebih dulu.",
+        "operationId": "list_answers_validation_answers_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Course Id"
+            }
+          },
+          {
+            "name": "only_pending",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "True = hanya yang belum dinilai (antrean kerja dosen).",
+              "default": true,
+              "title": "Only Pending"
+            },
+            "description": "True = hanya yang belum dinilai (antrean kerja dosen)."
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/validation/answers/{interaction_id}": {
+      "post": {
+        "tags": [
+          "validation"
+        ],
+        "summary": "Submit Verdict",
+        "description": "Simpan putusan dosen atas satu jawaban.\n\nPutusan lama tidak ditimpa — dosen yang berubah pikiran menghasilkan catatan\nbaru, dan yang berlaku adalah yang terakhir.",
+        "operationId": "submit_verdict_validation_answers__interaction_id__post",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "interaction_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "maxLength": 128,
+              "pattern": "^[A-Za-z0-9_-]+$",
+              "title": "Interaction Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ValidationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationVerdictResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/validation/stats": {
+      "get": {
+        "tags": [
+          "validation"
+        ],
+        "summary": "Get Stats",
+        "description": "Ringkasan hasil validasi — angka yang bisa langsung dikutip di makalah.",
+        "operationId": "get_stats_validation_stats_get",
+        "security": [
+          {
+            "APIKeyHeader": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ValidationStatsResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -817,6 +1364,7 @@
           "meta"
         ],
         "summary": "Health",
+        "description": "Pemeriksaan kesehatan — tanpa autentikasi, jadi isinya sengaja minim.\n\nVersi LLM dan nama model dihapus dari balasan: endpoint ini kerap terbuka ke\npemantau luar, dan menyebut versi komponen mempermudah pencarian kerentanan\nyang sudah diketahui.",
         "operationId": "health_health_get",
         "responses": {
           "200": {
@@ -870,7 +1418,7 @@
           "content"
         ],
         "title": "Attachment",
-        "description": "Berkas turunan dari sebuah jawaban, mis. notebook dari gaya belajar praktik.\n\nDibentuk deterministik dari isi jawaban â€” tanpa panggilan LLM tambahan â€”\nsehingga isinya dijamin sama dengan yang dibaca mahasiswa di layar."
+        "description": "Berkas turunan dari sebuah jawaban, mis. notebook dari gaya belajar praktik.\n\nDibentuk deterministik dari isi jawaban — tanpa panggilan LLM tambahan —\nsehingga isinya dijamin sama dengan yang dibaca mahasiswa di layar."
       },
       "BatchFileResult": {
         "properties": {
@@ -907,11 +1455,25 @@
       },
       "BatchIndexRequest": {
         "properties": {
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
           "content_id": {
             "type": "string",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
             "title": "Content Id"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "content_id"
@@ -1007,6 +1569,17 @@
               }
             ],
             "title": "Week"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
           }
         },
         "type": "object",
@@ -1104,7 +1677,7 @@
         },
         "type": "object",
         "title": "ChatContext",
-        "description": "Konteks yang sedang aktif â€” dipakai klien menampilkan breadcrumb."
+        "description": "Konteks yang sedang aktif — dipakai klien menampilkan breadcrumb."
       },
       "ChoiceInfo": {
         "properties": {
@@ -1124,7 +1697,8 @@
               "material",
               "style",
               "question",
-              "quiz"
+              "quiz",
+              "back"
             ],
             "title": "Kind"
           }
@@ -1137,6 +1711,69 @@
         ],
         "title": "ChoiceInfo",
         "description": "Satu pilihan yang bisa diklik mahasiswa di chat."
+      },
+      "CodeErrorInfo": {
+        "properties": {
+          "baris": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Baris"
+          },
+          "masalah": {
+            "type": "string",
+            "title": "Masalah"
+          },
+          "akibat": {
+            "type": "string",
+            "title": "Akibat",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "masalah"
+        ],
+        "title": "CodeErrorInfo"
+      },
+      "CodeFindingInfo": {
+        "properties": {
+          "severity": {
+            "type": "string",
+            "enum": [
+              "galat",
+              "peringatan",
+              "info"
+            ],
+            "title": "Severity"
+          },
+          "message": {
+            "type": "string",
+            "title": "Message"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          }
+        },
+        "type": "object",
+        "required": [
+          "severity",
+          "message"
+        ],
+        "title": "CodeFindingInfo"
       },
       "ContentListResponse": {
         "properties": {
@@ -1334,10 +1971,425 @@
         ],
         "title": "CourseListResponse"
       },
+      "EvaluationItemInfo": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "options": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Options"
+          },
+          "starter_code": {
+            "type": "string",
+            "title": "Starter Code",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "type",
+          "question"
+        ],
+        "title": "EvaluationItemInfo",
+        "description": "Satu soal seperti yang dilihat mahasiswa.\n\nTanpa kunci jawaban maupun rubrik — keduanya hanya ada di sisi server."
+      },
+      "EvaluationPlanInfo": {
+        "properties": {
+          "week": {
+            "type": "integer",
+            "title": "Week"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          },
+          "weeks_covered": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Weeks Covered"
+          },
+          "range_text": {
+            "type": "string",
+            "title": "Range Text"
+          },
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "week",
+          "kind",
+          "label",
+          "weeks_covered",
+          "range_text",
+          "counts",
+          "total"
+        ],
+        "title": "EvaluationPlanInfo",
+        "description": "Rencana sebuah evaluasi: kapan, jenisnya apa, mencakup minggu mana."
+      },
+      "EvaluationQuestionsRequest": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Course Id"
+          },
+          "week": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 52.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week"
+          },
+          "weeks": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array",
+                "maxItems": 52
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weeks"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "kuis",
+                  "ets",
+                  "eas"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counts"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "course_id"
+        ],
+        "title": "EvaluationQuestionsRequest"
+      },
+      "EvaluationQuestionsResponse": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/EvaluationPlanInfo"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvaluationItemInfo"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_id",
+          "plan",
+          "items"
+        ],
+        "title": "EvaluationQuestionsResponse"
+      },
+      "EvaluationScheduleResponse": {
+        "properties": {
+          "evaluation_weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Evaluation Weeks"
+          },
+          "plans": {
+            "items": {
+              "$ref": "#/components/schemas/EvaluationPlanInfo"
+            },
+            "type": "array",
+            "title": "Plans"
+          }
+        },
+        "type": "object",
+        "required": [
+          "evaluation_weeks",
+          "plans"
+        ],
+        "title": "EvaluationScheduleResponse"
+      },
+      "EvaluationSubmitRequest": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Course Id"
+          },
+          "week": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 52.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week"
+          },
+          "weeks": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array",
+                "maxItems": 52
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weeks"
+          },
+          "kind": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "kuis",
+                  "ets",
+                  "eas"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
+          "counts": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Counts"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
+          "answers": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "array",
+            "maxItems": 40,
+            "title": "Answers"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "course_id"
+        ],
+        "title": "EvaluationSubmitRequest"
+      },
+      "EvaluationSubmitResponse": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "plan": {
+            "$ref": "#/components/schemas/EvaluationPlanInfo"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "benar": {
+            "type": "integer",
+            "title": "Benar"
+          },
+          "skor": {
+            "type": "number",
+            "title": "Skor"
+          },
+          "per_jenis": {
+            "additionalProperties": {
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Per Jenis"
+          },
+          "perlu_tinjauan": {
+            "type": "integer",
+            "title": "Perlu Tinjauan",
+            "default": 0
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/GradedItemInfo"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_id",
+          "plan",
+          "total",
+          "benar",
+          "skor",
+          "items"
+        ],
+        "title": "EvaluationSubmitResponse"
+      },
       "FeedbackRequest": {
         "properties": {
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
           "interaction_id": {
             "type": "string",
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
             "title": "Interaction Id"
           },
           "rating": {
@@ -1354,6 +2406,7 @@
               "type": "string"
             },
             "type": "array",
+            "maxItems": 20,
             "title": "Issues"
           },
           "comment": {
@@ -1369,6 +2422,7 @@
             "title": "Comment"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "interaction_id",
@@ -1454,6 +2508,83 @@
           "total_indexed"
         ],
         "title": "FileListResponse"
+      },
+      "GradedItemInfo": {
+        "properties": {
+          "index": {
+            "type": "integer",
+            "title": "Index"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "your_answer": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Your Answer"
+          },
+          "correct_answer": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Correct Answer"
+          },
+          "is_correct": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Is Correct"
+          },
+          "score": {
+            "type": "number",
+            "title": "Score"
+          },
+          "explanation": {
+            "type": "string",
+            "title": "Explanation",
+            "default": ""
+          },
+          "feedback": {
+            "type": "string",
+            "title": "Feedback",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "index",
+          "type",
+          "question",
+          "score"
+        ],
+        "title": "GradedItemInfo"
       },
       "HTTPValidationError": {
         "properties": {
@@ -1557,6 +2688,422 @@
         ],
         "title": "LearningStyleListResponse"
       },
+      "LivecodeExerciseInfo": {
+        "properties": {
+          "exercise_id": {
+            "type": "string",
+            "title": "Exercise Id"
+          },
+          "title": {
+            "type": "string",
+            "title": "Title"
+          },
+          "prompt": {
+            "type": "string",
+            "title": "Prompt"
+          },
+          "language": {
+            "type": "string",
+            "title": "Language",
+            "default": "python"
+          },
+          "starter_code": {
+            "type": "string",
+            "title": "Starter Code",
+            "default": ""
+          },
+          "expected_behavior": {
+            "type": "string",
+            "title": "Expected Behavior",
+            "default": ""
+          },
+          "required_function": {
+            "type": "string",
+            "title": "Required Function",
+            "default": ""
+          },
+          "forbidden_names": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Forbidden Names"
+          },
+          "example_inputs": {
+            "items": {},
+            "type": "array",
+            "title": "Example Inputs"
+          }
+        },
+        "type": "object",
+        "required": [
+          "exercise_id",
+          "title",
+          "prompt"
+        ],
+        "title": "LivecodeExerciseInfo",
+        "description": "Latihan seperti yang dilihat mahasiswa.\n\nTanpa rubrik dan tanpa keluaran kasus uji — kalau ikut dikirim, mahasiswa\ndapat menuliskan jawabannya langsung tanpa menulis programnya."
+      },
+      "LivecodeExercisesRequest": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Course Id"
+          },
+          "weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 52,
+            "minItems": 1,
+            "title": "Weeks"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Count",
+            "default": 3
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "course_id",
+          "weeks"
+        ],
+        "title": "LivecodeExercisesRequest"
+      },
+      "LivecodeExercisesResponse": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "title": "Course Id"
+          },
+          "exercises": {
+            "items": {
+              "$ref": "#/components/schemas/LivecodeExerciseInfo"
+            },
+            "type": "array",
+            "title": "Exercises"
+          }
+        },
+        "type": "object",
+        "required": [
+          "course_id",
+          "exercises"
+        ],
+        "title": "LivecodeExercisesResponse"
+      },
+      "LivecodeStatsResponse": {
+        "properties": {
+          "exercise_id": {
+            "type": "string",
+            "title": "Exercise Id"
+          },
+          "total_kiriman": {
+            "type": "integer",
+            "title": "Total Kiriman"
+          },
+          "lulus": {
+            "type": "integer",
+            "title": "Lulus"
+          },
+          "rasio_lulus": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rasio Lulus"
+          }
+        },
+        "type": "object",
+        "required": [
+          "exercise_id",
+          "total_kiriman",
+          "lulus"
+        ],
+        "title": "LivecodeStatsResponse"
+      },
+      "LivecodeSubmissionInfo": {
+        "properties": {
+          "submission_id": {
+            "type": "string",
+            "title": "Submission Id"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "exercise_id": {
+            "type": "string",
+            "title": "Exercise Id"
+          },
+          "student_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Student Id"
+          },
+          "lulus": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lulus"
+          },
+          "skor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Skor"
+          },
+          "code": {
+            "type": "string",
+            "title": "Code",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "submission_id",
+          "exercise_id"
+        ],
+        "title": "LivecodeSubmissionInfo"
+      },
+      "LivecodeSubmissionListResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "submissions": {
+            "items": {
+              "$ref": "#/components/schemas/LivecodeSubmissionInfo"
+            },
+            "type": "array",
+            "title": "Submissions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "submissions"
+        ],
+        "title": "LivecodeSubmissionListResponse"
+      },
+      "LivecodeSubmitRequest": {
+        "properties": {
+          "course_id": {
+            "type": "string",
+            "maxLength": 128,
+            "minLength": 1,
+            "title": "Course Id"
+          },
+          "weeks": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "maxItems": 52,
+            "minItems": 1,
+            "title": "Weeks"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
+          "exercise_id": {
+            "type": "string",
+            "maxLength": 256,
+            "minLength": 1,
+            "title": "Exercise Id"
+          },
+          "code": {
+            "type": "string",
+            "maxLength": 20000,
+            "title": "Code"
+          },
+          "student_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Student Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "count": {
+            "type": "integer",
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Count",
+            "default": 3
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "course_id",
+          "weeks",
+          "exercise_id",
+          "code"
+        ],
+        "title": "LivecodeSubmitRequest"
+      },
+      "LivecodeSubmitResponse": {
+        "properties": {
+          "exercise_id": {
+            "type": "string",
+            "title": "Exercise Id"
+          },
+          "submission_id": {
+            "type": "string",
+            "title": "Submission Id",
+            "default": ""
+          },
+          "lulus": {
+            "type": "boolean",
+            "title": "Lulus"
+          },
+          "skor": {
+            "type": "number",
+            "title": "Skor"
+          },
+          "ringkasan": {
+            "type": "string",
+            "title": "Ringkasan",
+            "default": ""
+          },
+          "temuan": {
+            "items": {
+              "$ref": "#/components/schemas/CodeFindingInfo"
+            },
+            "type": "array",
+            "title": "Temuan"
+          },
+          "benar": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Benar"
+          },
+          "keliru": {
+            "items": {
+              "$ref": "#/components/schemas/CodeErrorInfo"
+            },
+            "type": "array",
+            "title": "Keliru"
+          },
+          "petunjuk": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Petunjuk"
+          },
+          "perlu_tinjauan_dosen": {
+            "type": "boolean",
+            "title": "Perlu Tinjauan Dosen",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "exercise_id",
+          "lulus",
+          "skor"
+        ],
+        "title": "LivecodeSubmitResponse"
+      },
       "MaterialInfo": {
         "properties": {
           "source_file": {
@@ -1658,6 +3205,18 @@
       },
       "QueryRequest": {
         "properties": {
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
           "question": {
             "type": "string",
             "maxLength": 2000,
@@ -1667,7 +3226,9 @@
           "session_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
               },
               {
                 "type": "null"
@@ -1678,7 +3239,8 @@
           "content_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
               },
               {
                 "type": "null"
@@ -1690,7 +3252,8 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 255
+                "maxLength": 255,
+                "pattern": "^[^/\\\\\\x00]{1,255}$"
               },
               {
                 "type": "null"
@@ -1747,7 +3310,7 @@
             "anyOf": [
               {
                 "type": "string",
-                "maxLength": 128
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"
               },
               {
                 "type": "null"
@@ -1796,6 +3359,7 @@
             "title": "Weeks"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "question"
@@ -1993,18 +3557,33 @@
       },
       "QuizSubmitRequest": {
         "properties": {
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{1,62}$"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          },
           "answers": {
             "items": {
               "type": "integer"
             },
             "type": "array",
+            "maxItems": 100,
             "title": "Answers",
             "description": "Indeks opsi yang dipilih per soal (urut sesuai soal)"
           },
           "session_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]{1,64}$"
               },
               {
                 "type": "null"
@@ -2015,7 +3594,8 @@
           "student_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 128
               },
               {
                 "type": "null"
@@ -2024,6 +3604,7 @@
             "title": "Student Id"
           }
         },
+        "additionalProperties": false,
         "type": "object",
         "required": [
           "answers"
@@ -2255,6 +3836,107 @@
         "title": "TranscriptMessage",
         "description": "Satu pesan seperti yang tampil di layar, termasuk langkah navigasi."
       },
+      "ValidationAnswerInfo": {
+        "properties": {
+          "interaction_id": {
+            "type": "string",
+            "title": "Interaction Id"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question",
+            "default": ""
+          },
+          "answer": {
+            "type": "string",
+            "title": "Answer",
+            "default": ""
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/SourceInfo"
+            },
+            "type": "array",
+            "title": "Sources"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "course_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Id"
+          },
+          "session_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Session Id"
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "sesuai",
+                  "perlu_perbaikan",
+                  "tidak_sesuai"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verdict"
+          },
+          "catatan": {
+            "type": "string",
+            "title": "Catatan",
+            "default": ""
+          },
+          "dosen_id": {
+            "type": "string",
+            "title": "Dosen Id",
+            "default": ""
+          }
+        },
+        "type": "object",
+        "required": [
+          "interaction_id"
+        ],
+        "title": "ValidationAnswerInfo",
+        "description": "Satu jawaban AI beserta status validasinya."
+      },
       "ValidationError": {
         "properties": {
           "loc": {
@@ -2287,6 +3969,176 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "ValidationListResponse": {
+        "properties": {
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "answers": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationAnswerInfo"
+            },
+            "type": "array",
+            "title": "Answers"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total",
+          "answers"
+        ],
+        "title": "ValidationListResponse"
+      },
+      "ValidationRequest": {
+        "properties": {
+          "verdict": {
+            "type": "string",
+            "enum": [
+              "sesuai",
+              "perlu_perbaikan",
+              "tidak_sesuai"
+            ],
+            "title": "Verdict"
+          },
+          "catatan": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 4000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Catatan"
+          },
+          "dosen_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dosen Id"
+          },
+          "course_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Course Id"
+          },
+          "content_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 128
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content Id"
+          },
+          "tenant_id": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 64
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tenant Id"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "verdict"
+        ],
+        "title": "ValidationRequest"
+      },
+      "ValidationStatsResponse": {
+        "properties": {
+          "total_jawaban": {
+            "type": "integer",
+            "title": "Total Jawaban"
+          },
+          "sudah_dinilai": {
+            "type": "integer",
+            "title": "Sudah Dinilai"
+          },
+          "belum_dinilai": {
+            "type": "integer",
+            "title": "Belum Dinilai"
+          },
+          "rincian": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Rincian"
+          },
+          "akurasi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Akurasi"
+          }
+        },
+        "type": "object",
+        "required": [
+          "total_jawaban",
+          "sudah_dinilai",
+          "belum_dinilai",
+          "rincian"
+        ],
+        "title": "ValidationStatsResponse"
+      },
+      "ValidationVerdictResponse": {
+        "properties": {
+          "interaction_id": {
+            "type": "string",
+            "title": "Interaction Id"
+          },
+          "verdict": {
+            "type": "string",
+            "title": "Verdict"
+          },
+          "catatan": {
+            "type": "string",
+            "title": "Catatan",
+            "default": ""
+          },
+          "at": {
+            "type": "string",
+            "title": "At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "interaction_id",
+          "verdict",
+          "at"
+        ],
+        "title": "ValidationVerdictResponse"
       },
       "WeekListResponse": {
         "properties": {
