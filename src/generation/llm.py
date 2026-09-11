@@ -21,7 +21,7 @@ from tenacity import (
 )
 
 from src import model_registry
-from src.config import settings
+from src.config import MAX_GENERATION_TOKENS, settings
 from src.generation.prompts import (
     CODE_REVIEW_SYSTEM_PROMPT,
     DECOMPOSE_SYSTEM_PROMPT,
@@ -73,6 +73,18 @@ _EVAL_MAX_TOKENS = 8192
 # kodenya benar. Batas atas, bukan target: sisanya tidak ditagih.
 _REVIEW_MAX_TOKENS = 6144
 
+# Model penalar bisa memakai SELURUH max_tokens untuk berpikir lalu mengembalikan
+# konten kosong. Mengulang panggilan yang sama persis hampir pasti berakhir sama,
+# jadi percobaan ulang menaikkan anggarannya. Dibatasi ketat karena tiap percobaan
+# adalah panggilan berbayar penuh: satu kali ulang, faktor 1,5x, dan tidak pernah
+# melewati batas atas yang diterima config (generation_max_tokens le=16384).
+_EMPTY_RETRY_ATTEMPTS = 2
+_EMPTY_RETRY_GROWTH = 1.5
+# Diambil dari config, bukan diketik ulang: kalau batas di sana dinaikkan tanpa
+# angka ini ikut naik, percobaan ulang berhenti lebih awal daripada yang
+# diizinkan config — diam-diam, tanpa galat.
+_MAX_TOKENS_CEILING = MAX_GENERATION_TOKENS
+
 
 def _usage_summary(response: Any) -> str:
     """Ringkasan pemakaian token (dan biaya bila penyedia mengirimkannya).
@@ -103,6 +115,54 @@ def _usage_summary(response: Any) -> str:
     return "usage: " + " ".join(bagian)
 
 
+def _finish_reason(response: Any) -> str | None:
+    """Alasan model berhenti menulis: 'stop', 'length', 'content_filter', ...
+
+    Dibaca dari pilihan pertama; sebagian SDK OpenAI-compatible mengembalikan
+    choice sebagai dict. None bila penyedia tidak mengirimkannya sama sekali —
+    ketiadaan alasan TIDAK boleh dibaca sebagai "keluaran utuh".
+    """
+    try:
+        choice = response.choices[0]
+    except (AttributeError, IndexError, TypeError):
+        return None
+    reason = getattr(choice, "finish_reason", None)
+    if reason is None and isinstance(choice, dict):
+        reason = choice.get("finish_reason")
+    return str(reason) if reason else None
+
+
+def _completion_tokens(response: Any) -> int | None:
+    """Token keluaran yang terpakai (penalaran + jawaban), bila dilaporkan."""
+    u = getattr(response, "usage", None)
+    if u is None:
+        return None
+    n = getattr(u, "completion_tokens", None)
+    if n is None and isinstance(u, dict):
+        n = u.get("completion_tokens")
+    try:
+        return int(n)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _anggaran_habis(response: Any, max_tokens: int) -> bool:
+    """Apakah keluaran kosong itu karena jatah token habis, bukan model menolak.
+
+    Dua isyarat yang masing-masing berdiri sendiri:
+    - finish_reason == 'length', pernyataan eksplisit penyedia bahwa keluaran
+      dipotong di batas anggaran;
+    - completion_tokens sudah menyentuh max_tokens, dipakai untuk penyedia yang
+      tidak mengirim finish_reason.
+    Penolakan model ('stop' dengan konten kosong, 'content_filter') sengaja tidak
+    termasuk: mengulangnya hanya membakar biaya untuk hasil yang sama.
+    """
+    if _finish_reason(response) == "length":
+        return True
+    dipakai = _completion_tokens(response)
+    return dipakai is not None and dipakai >= max_tokens
+
+
 def _detect_image_mime(image_base64: str) -> str:
     import base64 as _b64
     try:
@@ -122,6 +182,14 @@ def _detect_image_mime(image_base64: str) -> str:
 
 class GenerationError(RuntimeError):
     """Raised when generation fails after retries."""
+
+
+class TruncatedGenerationError(GenerationError):
+    """Konten kosong karena anggaran token habis sebelum model menulis jawaban.
+
+    Dipisahkan dari GenerationError biasa supaya HANYA kegagalan jenis ini yang
+    diulang dengan anggaran lebih besar; penolakan model tetap gagal permanen.
+    """
 
 
 class LLMGenerator:
@@ -448,13 +516,50 @@ class LLMGenerator:
             )
         return content
 
+    async def _call_with_retry(
+        self,
+        messages: list[Any],
+        *,
+        model: str | None = None,
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> str:
+        """Panggil model, dengan dua jenis percobaan ulang yang berbeda sebabnya.
+
+        Gangguan jaringan diurus tenacity di `_call_once` — mengulang panggilan
+        yang sama persis memang cukup di sana. Yang diurus di sini hanya satu hal
+        yang TIDAK bisa diperbaiki dengan mengulang panggilan identik: anggaran
+        token habis saat model masih menalar sehingga kontennya kosong. Ulangan
+        untuk kasus itu harus membawa anggaran lebih besar, dan jumlahnya dibatasi
+        karena setiap percobaan adalah panggilan berbayar penuh.
+        """
+        max_tok = max_tokens if max_tokens is not None else settings.generation_max_tokens
+        sisa = _EMPTY_RETRY_ATTEMPTS
+        while True:
+            try:
+                return await self._call_once(
+                    messages, model=model, temperature=temperature, max_tokens=max_tok
+                )
+            except TruncatedGenerationError:
+                sisa -= 1
+                naik = min(int(max_tok * _EMPTY_RETRY_GROWTH), _MAX_TOKENS_CEILING)
+                # Berhenti bila jatah percobaan habis atau anggaran sudah mentok di
+                # plafon: menaikkan ke nilai yang sama hanya mengulang kegagalan.
+                if sisa <= 0 or naik <= max_tok:
+                    raise
+                logger.warning(
+                    "Konten kosong karena anggaran habis; ulangi dengan max_tokens {} -> {}",
+                    max_tok, naik,
+                )
+                max_tok = naik
+
     @retry(
         retry=retry_if_exception_type(_RETRYABLE),
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=1, max=8),
         reraise=True,
     )
-    async def _call_with_retry(
+    async def _call_once(
         self,
         messages: list[Any],
         *,
@@ -477,12 +582,29 @@ class LLMGenerator:
         except Exception as exc:
             raise GenerationError(f"LLM call failed: {exc}") from exc
 
+        alasan = _finish_reason(response)
+        # finish_reason ikut dicatat pada setiap panggilan: tanpa itu laju pemotongan
+        # keluaran tak terpantau sama sekali, dan parse JSON yang gagal tidak bisa
+        # dibedakan antara "model salah format" dan "kalimatnya terpotong di tengah".
+        ringkasan = f"finish={alasan or '?'} | {_usage_summary(response)}"
         content = (response.choices[0].message.content or "").strip()
+
+        if alasan == "length":
+            logger.warning(
+                "Keluaran DIPOTONG di batas anggaran: model={} max_tokens={} chars={} | {}",
+                model_id, max_tok, len(content), ringkasan,
+            )
+
         if not content:
-            raise GenerationError("LLM returned empty content")
+            if _anggaran_habis(response, max_tok):
+                raise TruncatedGenerationError(
+                    f"LLM returned empty content, anggaran habis "
+                    f"(max_tokens={max_tok}) | {ringkasan}"
+                )
+            raise GenerationError(f"LLM returned empty content | {ringkasan}")
 
         logger.info(
             "Generated {} chars via model={} | {}",
-            len(content), model_id, _usage_summary(response),
+            len(content), model_id, ringkasan,
         )
         return content

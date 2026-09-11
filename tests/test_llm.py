@@ -15,10 +15,49 @@ from src.generation.llm import GenerationError, LLMGenerator
 from src.generation.prompts import FormattedContext
 
 
-def _completion(content: str) -> SimpleNamespace:
+def _completion(
+    content: str,
+    finish_reason: str | None = None,
+    usage: SimpleNamespace | None = None,
+) -> SimpleNamespace:
+    """Respons chat-completion tiruan.
+
+    `finish_reason` dan `usage` opsional agar bentuk lama tetap terpakai sebagai
+    kasus "penyedia tidak melaporkan apa pun".
+    """
     return SimpleNamespace(
-        choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        choices=[
+            SimpleNamespace(
+                message=SimpleNamespace(content=content),
+                finish_reason=finish_reason,
+            )
+        ],
+        usage=usage,
     )
+
+
+def _usage(
+    prompt: int = 100, completion: int = 50, reasoning: int | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        prompt_tokens=prompt,
+        completion_tokens=completion,
+        completion_tokens_details=SimpleNamespace(reasoning_tokens=reasoning),
+    )
+
+
+class _LogPalsu:
+    """Perekam log; loguru dipanggil dengan placeholder {} sehingga cukup format()."""
+
+    def __init__(self) -> None:
+        self.info_baris: list[str] = []
+        self.warning_baris: list[str] = []
+
+    def info(self, msg: str, *args: object) -> None:
+        self.info_baris.append(msg.format(*args))
+
+    def warning(self, msg: str, *args: object) -> None:
+        self.warning_baris.append(msg.format(*args))
 
 
 def _make_generator(
@@ -183,3 +222,154 @@ class TestModelSwitching:
         assert len(quiz) == 1
         assert quiz[0]["answer_index"] == 2
         assert len(quiz[0]["options"]) == 4
+
+
+class TestAnggaranHabis:
+    """Konten kosong karena jatah token habis harus diulang; penolakan tidak.
+
+    Model penalar (Qwen 3.7) memakai 2.900-3.800 token untuk berpikir sebelum
+    menulis apa pun. Bila jatahnya habis di situ, penyedia mengembalikan konten
+    kosong dengan finish_reason='length' — kegagalan sementara yang dulu justru
+    permanen karena GenerationError tidak pernah diulang.
+    """
+
+    @pytest.mark.asyncio
+    async def test_kosong_karena_length_diulang_dengan_anggaran_lebih_besar(self) -> None:
+        gen, create_mock = _make_generator()
+        create_mock.side_effect = [
+            _completion("", finish_reason="length", usage=_usage(completion=3072, reasoning=3072)),
+            _completion("Jawaban pada percobaan kedua."),
+        ]
+
+        hasil = await gen.generate("q", FormattedContext("ctx", []))
+
+        assert hasil == "Jawaban pada percobaan kedua."
+        assert create_mock.call_count == 2
+        anggaran_1 = create_mock.call_args_list[0].kwargs["max_tokens"]
+        anggaran_2 = create_mock.call_args_list[1].kwargs["max_tokens"]
+        # Mengulang dengan anggaran yang sama akan terpotong di titik yang sama.
+        assert anggaran_2 > anggaran_1
+
+    @pytest.mark.asyncio
+    async def test_length_terus_menerus_berhenti_pada_batas_percobaan(self) -> None:
+        from src.generation.llm import _EMPTY_RETRY_ATTEMPTS
+
+        gen, create_mock = _make_generator()
+        create_mock.return_value = _completion(
+            "", finish_reason="length", usage=_usage(completion=3072)
+        )
+
+        with pytest.raises(GenerationError, match="empty content"):
+            await gen.generate("q", FormattedContext("ctx", []))
+
+        # Panggilan mahal tidak boleh diulang tanpa batas.
+        assert create_mock.call_count == _EMPTY_RETRY_ATTEMPTS
+
+    @pytest.mark.asyncio
+    async def test_anggaran_tidak_pernah_melewati_plafon(self) -> None:
+        from src.generation.llm import _MAX_TOKENS_CEILING
+
+        gen, create_mock = _make_generator()
+        create_mock.return_value = _completion("", finish_reason="length")
+
+        with pytest.raises(GenerationError):
+            await gen._call_with_retry(
+                [{"role": "user", "content": "q"}], max_tokens=_MAX_TOKENS_CEILING
+            )
+
+        # Sudah mentok di plafon: menaikkan lagi mustahil, jadi tidak ada ulangan.
+        assert create_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_completion_tokens_menyentuh_batas_dianggap_terpotong(self) -> None:
+        """Penyedia yang tidak mengirim finish_reason tetap terdeteksi."""
+        gen, create_mock = _make_generator()
+        create_mock.side_effect = [
+            _completion("", usage=_usage(completion=3072)),
+            _completion("Jawaban."),
+        ]
+
+        hasil = await gen.generate("q", FormattedContext("ctx", []))
+
+        assert hasil == "Jawaban."
+        assert create_mock.call_count == 2
+
+
+class TestKegagalanPermanenTidakDiulang:
+    @pytest.mark.asyncio
+    async def test_kosong_dengan_finish_stop_gagal_sekali_saja(self) -> None:
+        """Model selesai bicara tetapi tidak menulis apa pun — penolakan, bukan potong."""
+        gen, create_mock = _make_generator()
+        create_mock.return_value = _completion(
+            "", finish_reason="stop", usage=_usage(completion=12)
+        )
+
+        with pytest.raises(GenerationError, match="empty content"):
+            await gen.generate("q", FormattedContext("ctx", []))
+
+        assert create_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_kosong_karena_content_filter_tidak_diulang(self) -> None:
+        gen, create_mock = _make_generator()
+        create_mock.return_value = _completion(
+            "", finish_reason="content_filter", usage=_usage(completion=5)
+        )
+
+        with pytest.raises(GenerationError):
+            await gen.generate("q", FormattedContext("ctx", []))
+
+        assert create_mock.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_galat_non_retryable_tidak_diulang(self) -> None:
+        gen, create_mock = _make_generator()
+        create_mock.side_effect = ValueError("400 bad request")
+
+        with pytest.raises(GenerationError, match="LLM call failed"):
+            await gen.generate("q", FormattedContext("ctx", []))
+
+        assert create_mock.call_count == 1
+
+
+class TestInstrumentasiFinishReason:
+    @pytest.mark.asyncio
+    async def test_pemotongan_dicatat_sebagai_peringatan(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Jawaban terpotong tetap dikembalikan, tetapi tidak boleh lewat diam-diam."""
+        log = _LogPalsu()
+        monkeypatch.setattr("src.generation.llm.logger", log)
+        gen, create_mock = _make_generator()
+        create_mock.return_value = _completion(
+            "Jawaban yang terpoto", finish_reason="length",
+            usage=_usage(completion=3072, reasoning=2900),
+        )
+
+        await gen.generate("q", FormattedContext("ctx", []))
+
+        gabung = " | ".join(log.warning_baris)
+        assert "DIPOTONG" in gabung
+        assert "max_tokens=3072" in gabung
+        assert "finish=length" in gabung
+
+    @pytest.mark.asyncio
+    async def test_log_sukses_memuat_finish_reason_dan_token(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        log = _LogPalsu()
+        monkeypatch.setattr("src.generation.llm.logger", log)
+        gen, create_mock = _make_generator()
+        create_mock.return_value = _completion(
+            "Jawaban utuh.", finish_reason="stop",
+            usage=_usage(prompt=800, completion=420, reasoning=310),
+        )
+
+        await gen.generate("q", FormattedContext("ctx", []))
+
+        baris = " | ".join(log.info_baris)
+        assert "finish=stop" in baris
+        assert "out=420" in baris
+        assert "reasoning=310" in baris
+        assert not log.warning_baris
+

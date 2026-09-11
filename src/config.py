@@ -11,6 +11,13 @@ from pydantic_settings import SettingsConfigDict as SettingsConfigDict  # re-exp
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+# Batas atas anggaran token keluaran, dipakai bersama oleh `generation_max_tokens`
+# di bawah dan oleh mekanisme percobaan-ulang di src/generation/llm.py. Ditaruh di
+# sini supaya keduanya tidak pernah lepas sinkron: menaikkan batas config tanpa
+# menaikkan plafon percobaan ulang membuat percobaan itu berhenti lebih awal
+# daripada yang diizinkan config, tanpa pesan galat apa pun.
+MAX_GENERATION_TOKENS = 16384
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
@@ -100,7 +107,7 @@ class Settings(BaseSettings):
     # (mis. Qwen 3.7) menghabiskan token untuk penalaran sebelum menulis jawaban,
     # dan token itu ikut dihitung ke batas ini — jawaban level "detail" berisiko
     # terpotong di tengah. Batas atas, bukan target; sisanya tidak ditagih.
-    generation_max_tokens: int = Field(default=3072, ge=64, le=16384)
+    generation_max_tokens: int = Field(default=3072, ge=64, le=MAX_GENERATION_TOKENS)
 
     # --- Embedding ---
     embed_model: str = "BAAI/bge-m3"
@@ -110,6 +117,11 @@ class Settings(BaseSettings):
 
     # --- Reranker ---
     reranker_model: str = "BAAI/bge-reranker-v2-m3"
+    # Batas token untuk PASANGAN kueri+dokumen, bukan untuk dokumen saja. Lewat
+    # batas ini cross-encoder membuang ekornya diam-diam. Dapat dinaikkan lewat
+    # .env setelah membaca peringatan pemotongan di log — dengan ongkos: biaya
+    # rerank tumbuh bersama panjangnya, dan di CPU sudah ±1,96 detik per pasangan.
+    reranker_max_length: int = Field(default=512, ge=128, le=8192)
 
     # --- Transcription (video/audio → teks, agar bisa ditanya) ---
     # Butuh ffmpeg di sistem. "disabled" → file media tetap disimpan tapi tak diindex.
