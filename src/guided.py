@@ -220,16 +220,56 @@ def find_week(text: str, *, allow_bare_number: bool = False) -> int | None:
     return None
 
 
+# Kata yang mendahului nama mata kuliah saat mahasiswa menyebutnya sebagai
+# KONTEKS ("... di sbd minggu 3", "buka mata kuliah struktur data"), bukan
+# sebagai topik yang sedang ia tanyakan.
+_CONTEXT_MARKERS = frozenset({
+    "di", "pada", "untuk", "dari", "materi", "matkul", "kuliah", "mapel",
+    "ganti", "pindah", "beralih", "buka",
+})
+
+# "ke" terlalu umum untuk berdiri sendiri sebagai penanda — "jalan ke data
+# center" bukan permintaan pindah — jadi hanya dihitung bila didahului kata
+# kerja perpindahan: "ganti ke basis data", "pindah ke struktur data".
+_SWITCH_VERBS = frozenset({"ganti", "pindah", "beralih", "lanjut", "kembali", "balik"})
+
+
+def _mentioned_as_context(folded: str, tokens: list[str]) -> bool:
+    """Apakah salah satu `tokens` didahului kata penanda konteks di `folded`?"""
+    kata = folded.split(" ")
+    dicari = set(tokens)
+    for i, w in enumerate(kata):
+        if i == 0 or w not in dicari:
+            continue
+        sebelum = kata[i - 1]
+        if sebelum in _CONTEXT_MARKERS:
+            return True
+        if sebelum == "ke" and i >= 2 and kata[i - 2] in _SWITCH_VERBS:
+            return True
+    return False
+
+
 def match_course(text: str, courses: list[dict]) -> str | None:
     """Cocokkan teks ke salah satu course terindex; None kalau tidak yakin.
 
     `courses` = [{course_id, course_name}] dari store. Pencocokan dilakukan
     terhadap keduanya, dan yang paling banyak kata cocoknya menang — jadi
     "sistem basis data" mengalahkan tebakan berdasarkan satu kata saja.
+
+    Pada pesan yang berupa PERTANYAAN ISI, nama mata kuliah hanya dianggap
+    pemilihan konteks kalau ada penandanya ("di sbd minggu 3", "ganti ke basis
+    data"). Tanpa syarat itu, kata umum yang kebetulan menjadi nama mata kuliah
+    — "data", "struktur", "dasar" — membuat pertanyaan materi biasa memindahkan
+    sesi mahasiswa ke mata kuliah lain tanpa ia minta: diam-diam, tanpa galat,
+    dan paling sering justru dipicu oleh pertanyaan template buatan sistem
+    sendiri. Pesan yang bukan pertanyaan (klik tombol, "sbd", "ganti ke X")
+    tidak dibatasi — di situ menyebut nama mata kuliah memang berarti memilih.
     """
-    haystack = set(_tokens(text))
-    if not haystack:
+    folded = _fold(text)
+    if not folded:
         return None
+    haystack = set(folded.split(" "))
+    perlu_penanda = looks_like_question(text)
 
     best_score = 0
     best_id: str | None = None
@@ -242,16 +282,19 @@ def match_course(text: str, courses: list[dict]) -> str | None:
             cand_tokens = [t for t in _tokens(candidate) if t not in _STOPWORDS]
             if not cand_tokens:
                 continue
-            hits = sum(1 for t in cand_tokens if t in haystack)
-            # Semua kata cocok → skor penuh; sebagian cocok hanya dihitung
-            # kalau katanya cukup panjang (hindari cocok karena "di", "3").
-            if hits == len(cand_tokens):
-                score = max(score, hits * 2)
-            elif hits:
-                long_hits = sum(
-                    1 for t in cand_tokens if t in haystack and len(t) >= 4
-                )
-                score = max(score, long_hits)
+            hits = [t for t in cand_tokens if t in haystack]
+            if not hits or (perlu_penanda
+                            and not _mentioned_as_context(folded, hits)):
+                continue
+            if len(hits) == len(cand_tokens):
+                score = max(score, len(hits) * 2)
+            else:
+                # Sebagian kata cocok: hanya kata panjang yang dihitung (hindari
+                # cocok karena "di", "3"), dan harus mayoritas nama — satu kata
+                # umum tidak boleh mewakili nama yang terdiri dari beberapa kata.
+                panjang = [t for t in hits if len(t) >= 4]
+                if len(panjang) * 2 >= len(cand_tokens):
+                    score = max(score, len(panjang))
         if score > best_score:
             best_score, best_id = score, cid
     return best_id
