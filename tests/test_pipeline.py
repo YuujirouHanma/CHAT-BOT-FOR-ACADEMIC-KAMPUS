@@ -50,6 +50,11 @@ def _make_pipeline() -> tuple[RAGPipeline, dict]:
     store = AsyncMock()
     store.ensure_collection = AsyncMock()
     store.upsert_chunks = AsyncMock(return_value=1)
+    # Teks materi kini diambil sebelum cache diperiksa — sidik jarinya ikut
+    # menyusun kunci cache — jadi keduanya harus mengembalikan str sungguhan,
+    # bukan MagicMock bawaan AsyncMock.
+    store.get_material_text = AsyncMock(return_value="isi materi contoh")
+    store.get_week_text = AsyncMock(return_value="isi materi minggu contoh")
 
     reranker = AsyncMock()
     generator = AsyncMock()
@@ -153,6 +158,35 @@ class TestIndexDocument:
         assert result.elements_parsed == 1
         assert result.chunks_created == 1
         assert result.points_stored == 1
+
+    @pytest.mark.asyncio
+    async def test_indeks_ulang_membersihkan_potongan_lama_sesudah_menulis(
+        self, tmp_path: Path,
+    ) -> None:
+        """Tulis dulu, baru hapus yang basi — gagal di tengah tidak menghapus materi."""
+        pipeline, mocks = _make_pipeline()
+        urutan: list[str] = []
+        mocks["store"].upsert_chunks = AsyncMock(
+            side_effect=lambda *a, **k: urutan.append("upsert") or 1,
+        )
+        mocks["store"].delete_stale_chunks = AsyncMock(
+            side_effect=lambda *a, **k: urutan.append("hapus_basi"),
+        )
+        doc = tmp_path / "bab1.pdf"
+        doc.write_bytes(b"fake pdf content")
+
+        with patch("src.pipeline.parse_document", return_value=[_parsed_element()]), \
+             patch("src.pipeline.enrich_elements", new_callable=AsyncMock,
+                   return_value=[_parsed_element()]):
+            await pipeline.index_document(doc, content_id="sbd-minggu-1", tenant_id=TENANT)
+
+        assert urutan == ["upsert", "hapus_basi"]
+        args = mocks["store"].delete_stale_chunks.await_args
+        assert args is not None
+        assert args.args[0] == "bab1.pdf"
+        assert args.args[1] == "sbd-minggu-1"
+        assert args.args[2] == [c.chunk_id for c in mocks["embedder"].embed_chunks.return_value]
+        assert args.kwargs["tenant_id"] == TENANT
 
     @pytest.mark.asyncio
     async def test_empty_parse_returns_zero_counts(self, tmp_path: Path) -> None:

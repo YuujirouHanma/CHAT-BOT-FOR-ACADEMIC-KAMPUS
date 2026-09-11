@@ -68,6 +68,30 @@ class GuidedTurn:
     topic: str | None = None
 
 
+def _umpan_balik_kode(nilai: dict) -> str:
+    """Rangkum hasil penilaian kode menjadi satu teks umpan balik.
+
+    Jalur kode menghasilkan temuan statis, catatan keliru, dan petunjuk secara
+    terpisah, sementara satu butir evaluasi hanya punya satu ruang umpan balik.
+    Ketiganya digabung supaya mahasiswa yang mengerjakan soal koding lewat
+    evaluasi tetap menerima koreksi yang sama rincinya dengan yang lewat
+    latihan mandiri.
+    """
+    bagian: list[str] = []
+    ringkas = (nilai.get("ringkasan") or "").strip()
+    if ringkas:
+        bagian.append(ringkas)
+    bagian += [
+        f"- {t['message']}" for t in nilai.get("temuan", [])
+        if t.get("severity") != "info" and t.get("message")
+    ]
+    bagian += [
+        f"- {k['masalah']}" for k in nilai.get("keliru", []) if k.get("masalah")
+    ]
+    bagian += [f"Petunjuk: {p}" for p in nilai.get("petunjuk", [])]
+    return "\n".join(bagian)
+
+
 def _course_name(courses: list[dict], course_id: str) -> str:
     """Nama tampilan sebuah course dari daftar terindex; fallback ke slug dirapikan."""
     for c in courses:
@@ -169,6 +193,12 @@ class RAGPipeline:
 
         embedded = await self._embedder.embed_chunks(chunks)
         stored = await self._store.upsert_chunks(embedded, tenant_id=tenant_id)
+        # Indeks ulang harus MENGGANTI, bukan menambah. Dibersihkan sesudah
+        # penulisan berhasil, supaya kegagalan di tengah tidak menghapus materi.
+        await self._store.delete_stale_chunks(
+            file_path.name, content_id, [c.chunk_id for c in embedded],
+            tenant_id=tenant_id,
+        )
 
         logger.info("=== Done {}: {} → {} → {} ===",
                      file_path.name, len(elements), len(chunks), stored)
@@ -488,14 +518,23 @@ class RAGPipeline:
         if not (course_id and weeks):
             return ""
         kunci = f"{course_id}::{'-'.join(str(w) for w in sorted(set(weeks)))}"
-        cached = gen_cache.load("week_topic", kunci, "topic", tenant_id=tenant_id)
+        # Teks diambil lebih dulu meski mungkin berujung cache hit: sidik
+        # jarinya ikut menentukan kunci, sehingga entri lama berhenti terpakai
+        # begitu materi atau cara perakitannya berubah.
+        text = await self._store.get_week_text(course_id, weeks, tenant_id=tenant_id)
+        sidik = gen_cache.hash_material(text)
+        cached = gen_cache.load(
+            "week_topic", kunci, "topic", tenant_id=tenant_id, material_hash=sidik,
+        )
         if cached is not None:
             return cached[0] if isinstance(cached, list) and cached else ""
 
-        text = await self._store.get_week_text(course_id, weeks, tenant_id=tenant_id)
         topik = await self._generator.summarize_week_topic(text, model=model)
         if topik:
-            gen_cache.save("week_topic", kunci, "topic", [topik], tenant_id=tenant_id)
+            gen_cache.save(
+                "week_topic", kunci, "topic", [topik],
+                tenant_id=tenant_id, material_hash=sidik,
+            )
         return topik
 
     async def _ask_course(self, courses: list[dict]) -> GuidedTurn:
@@ -531,18 +570,24 @@ class RAGPipeline:
         tenant_id = require_tenant_id(tenant_id, operation="starter_questions")
         spec = learning_styles.resolve(style)
         kunci = f"{source_file}::{spec.key}"
-        cached = gen_cache.load("starter", content_id, kunci, tenant_id=tenant_id)
-        if cached is not None:
-            return cached
-
         text = await self._store.get_material_text(
             content_id, source_file, tenant_id=tenant_id,
         )
+        sidik = gen_cache.hash_material(text)
+        cached = gen_cache.load(
+            "starter", content_id, kunci, tenant_id=tenant_id, material_hash=sidik,
+        )
+        if cached is not None:
+            return cached
+
         questions = await self._generator.generate_starter_questions(
             text, model=model, style_hint=spec.starter_hint,
         )
         if questions:
-            gen_cache.save("starter", content_id, kunci, questions, tenant_id=tenant_id)
+            gen_cache.save(
+                "starter", content_id, kunci, questions,
+                tenant_id=tenant_id, material_hash=sidik,
+            )
         return questions
 
     async def quiz(
@@ -551,16 +596,22 @@ class RAGPipeline:
     ) -> list[dict]:
         """Multiple-choice quiz for a material. Cached after first generation."""
         tenant_id = require_tenant_id(tenant_id, operation="quiz")
-        cached = gen_cache.load("quiz", content_id, source_file, tenant_id=tenant_id)
-        if cached is not None:
-            return cached
-
         text = await self._store.get_material_text(
             content_id, source_file, tenant_id=tenant_id,
         )
+        sidik = gen_cache.hash_material(text)
+        cached = gen_cache.load(
+            "quiz", content_id, source_file, tenant_id=tenant_id, material_hash=sidik,
+        )
+        if cached is not None:
+            return cached
+
         quiz = await self._generator.generate_quiz(text, model=model)
         if quiz:
-            gen_cache.save("quiz", content_id, source_file, quiz, tenant_id=tenant_id)
+            gen_cache.save(
+                "quiz", content_id, source_file, quiz,
+                tenant_id=tenant_id, material_hash=sidik,
+            )
         return quiz
 
     async def evaluation(
@@ -587,10 +638,6 @@ class RAGPipeline:
             f"{plan.kind}::{'-'.join(str(w) for w in plan.weeks_covered)}"
             f"::{'-'.join(f'{t}{n}' for t, n in sorted(plan.blueprint.counts.items()))}"
         )
-        cached = gen_cache.load("evaluation", course_id, kunci, tenant_id=tenant_id)
-        if cached is not None:
-            return cached
-
         teks = await self._store.get_week_text(
             course_id, list(plan.weeks_covered), max_chars=12_000,
             tenant_id=tenant_id,
@@ -602,12 +649,20 @@ class RAGPipeline:
             )
             return []
 
+        sidik = gen_cache.hash_material(teks)
+        cached = gen_cache.load(
+            "evaluation", course_id, kunci, tenant_id=tenant_id, material_hash=sidik,
+        )
+        if cached is not None:
+            return cached
+
         soal = await self._generator.generate_evaluation(
             teks, plan.label, plan.range_text, plan.blueprint.counts, model=model,
         )
         if soal:
             gen_cache.save(
-                "evaluation", course_id, kunci, soal, tenant_id=tenant_id,
+                "evaluation", course_id, kunci, soal,
+                tenant_id=tenant_id, material_hash=sidik,
             )
         return soal
 
@@ -621,9 +676,12 @@ class RAGPipeline:
     ) -> dict:
         """Nilai satu evaluasi bercampur jenis soal.
 
-        Soal objektif dinilai mesin — pasti, seketika, tanpa biaya. Sisanya
-        dinilai LLM terhadap kunci/rubrik. Butir yang LLM ragu atau gagal
-        dinilai ditandai `perlu_tinjauan`, bukan diberi nol diam-diam.
+        Soal objektif dinilai mesin — pasti, seketika, tanpa biaya. Soal
+        `koding` dinilai lewat jalur kode (analisis statis + tinjauan kode),
+        bukan lewat pemeriksa prosa: kode yang sama harus mendapat satu standar
+        penilaian, dari endpoint mana pun ia dikirim. Sisanya dinilai LLM
+        terhadap kunci/rubrik. Butir yang LLM ragu atau gagal dinilai ditandai
+        `perlu_tinjauan`, bukan diberi nol diam-diam.
         """
         require_tenant_id(tenant_id, operation="grade_evaluation")
         hasil: list[evaluation_mod.GradedItem] = []
@@ -633,6 +691,12 @@ class RAGPipeline:
 
             if not evaluation_mod.needs_llm_grading(butir):
                 hasil.append(evaluation_mod.grade_objective(butir, jawaban, i))
+                continue
+
+            if butir.get("type") == "koding":
+                hasil.append(
+                    await self._grade_koding_item(butir, jawaban, i, model=model),
+                )
                 continue
 
             nilai = await self._generator.grade_open_answer(
@@ -671,6 +735,39 @@ class RAGPipeline:
             for g in hasil
         ]
         return ringkas
+
+    async def _grade_koding_item(
+        self,
+        item: dict,
+        answer: object,
+        index: int,
+        *,
+        model: str | None = None,
+    ) -> evaluation_mod.GradedItem:
+        """Nilai satu butir `koding` evaluasi lewat jalur penilaian kode.
+
+        Butirnya diubah dulu menjadi latihan livecode supaya yang dinilai
+        benar-benar objek yang sama dengan latihan mandiri — termasuk ketika
+        soalnya tidak menyertakan `test_cases` maupun `required_function`.
+        Spesifikasi yang kosong itu keadaan yang sah, bukan galat: analisis
+        statis melewatkan pemeriksaan yang tidak diminta, dan tinjauan kode
+        tetap berjalan dengan berbekal perintah soal.
+        """
+        latihan = livecode_mod.exercise_from_item(item, index=index)
+        kode = answer if isinstance(answer, str) else ""
+        nilai = await self._review_code(latihan, kode, model=model)
+        return evaluation_mod.GradedItem(
+            index=index,
+            type="koding",
+            question=item.get("question", ""),
+            student_answer=answer,
+            correct_answer=item.get("expected_behavior", ""),
+            # None = belum dapat dipastikan; dosen yang memutuskan.
+            is_correct=None if nilai["perlu_tinjauan_dosen"] else nilai["lulus"],
+            score=nilai["skor"],
+            explanation=item.get("explanation", ""),
+            feedback=_umpan_balik_kode(nilai),
+        )
 
     async def livecode_exercises(
         self,
@@ -716,16 +813,40 @@ class RAGPipeline:
         session_id: str | None = None,
         model: str | None = None,
     ) -> dict:
-        """Nilai satu kiriman kode: analisis statis dulu, LLM hanya bila perlu.
+        """Nilai satu kiriman kode dan catat kirimannya.
+
+        Penilaiannya sendiri ada di `_review_code`, yang dipakai bersama butir
+        `koding` pada evaluasi. Yang khusus di sini hanya pencatatan kiriman:
+        riwayat percobaan itu milik latihan mandiri, bukan bagian dari menilai.
+        """
+        require_tenant_id(tenant_id, operation="grade_livecode")
+
+        hasil = await self._review_code(exercise, code, model=model)
+        hasil["submission_id"] = livecode_mod.record_submission(
+            tenant_id=tenant_id, exercise_id=exercise.exercise_id,
+            student_id=student_id, code=code, result=hasil, session_id=session_id,
+        )
+        return hasil
+
+    async def _review_code(
+        self,
+        exercise: livecode_mod.Exercise,
+        code: str,
+        *,
+        model: str | None = None,
+    ) -> dict:
+        """Jalur penilaian kode: analisis statis dulu, LLM hanya bila perlu.
 
         Urutannya menentukan. Galat sintaks dan fungsi yang belum didefinisikan
         sudah pasti tanpa perlu penalaran apa pun — memanggil LLM untuk itu
         membuang biaya dan waktu tunggu mahasiswa, sekaligus berisiko
         menghasilkan diagnosis yang lebih kabur daripada pesan galat Python
         yang sudah menyebut nomor barisnya.
-        """
-        require_tenant_id(tenant_id, operation="grade_livecode")
 
+        Satu-satunya jalur menilai kode di seluruh sistem: /livecode/submit dan
+        butir `koding` pada /evaluation/submit sama-sama lewat sini, supaya kode
+        yang sama tidak dinilai dengan dua standar yang berbeda.
+        """
         temuan, layak_llm = livecode_mod.analyze_code(code, exercise)
         memblokir = livecode_mod.has_blocking_error(temuan)
 
@@ -759,11 +880,6 @@ class RAGPipeline:
             "petunjuk": (tinjauan or {}).get("petunjuk", []),
             "perlu_tinjauan_dosen": ragu,
         }
-
-        hasil["submission_id"] = livecode_mod.record_submission(
-            tenant_id=tenant_id, exercise_id=exercise.exercise_id,
-            student_id=student_id, code=code, result=hasil, session_id=session_id,
-        )
         return hasil
 
     async def grade_quiz(

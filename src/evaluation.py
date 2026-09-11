@@ -192,8 +192,59 @@ class GradedItem:
     feedback: str = ""
 
 
+# Bentuk teks jawaban benar/salah yang diterima, dipetakan ke indeks opsi
+# ["Benar", "Salah"]. Klien JSON mengirim jawaban ini dalam bentuk yang
+# berbeda-beda; yang dinilai tetap indeksnya.
+_BENAR_SALAH_TEKS: Final[dict[str, int]] = {
+    "benar": 0, "true": 0, "b": 0,
+    "salah": 1, "false": 1, "s": 1,
+}
+
+
+def _indeks_pilihan(answer: Any) -> int | None:
+    """Indeks opsi yang dipilih pada soal berpilihan; None bila bukan indeks.
+
+    `bool` ditolak eksplisit: di Python ia subkelas `int`, sehingga tanpa
+    pemeriksaan ini `True` lolos sebagai indeks 1 dan `False` sebagai indeks 0.
+    """
+    if isinstance(answer, bool) or not isinstance(answer, int):
+        return None
+    return answer
+
+
+def _indeks_benar_salah(answer: Any) -> int | None:
+    """Indeks opsi untuk soal benar/salah, mengikuti urutan ["Benar", "Salah"].
+
+    Bentuk jawaban yang dianggap sah — sengaja lebih luas daripada pilihan
+    ganda, karena "benar/salah" secara alami dikirim sebagai boolean, bukan
+    sebagai nomor opsi:
+
+    - boolean JSON: `true` → 0 (Benar), `false` → 1 (Salah);
+    - indeks opsi: 0 atau 1, sama seperti pilihan ganda. Indeks di luar itu
+      tidak sah karena soal ini hanya punya dua opsi;
+    - teks: "benar"/"true"/"b" → 0 dan "salah"/"false"/"s" → 1, tanpa
+      membedakan huruf besar-kecil.
+
+    Selain itu dihitung tidak terjawab (None), termasuk teks "0"/"1" — angka
+    yang datang sebagai teks lebih mungkin berasal dari klien yang keliru
+    daripada dari mahasiswa yang memilih.
+    """
+    if isinstance(answer, bool):
+        return 0 if answer else 1
+    if isinstance(answer, int):
+        return answer if answer in (0, 1) else None
+    if isinstance(answer, str):
+        return _BENAR_SALAH_TEKS.get(answer.strip().lower())
+    return None
+
+
 def grade_objective(item: dict[str, Any], answer: Any, index: int) -> GradedItem:
     """Nilai satu soal objektif tanpa memanggil LLM.
+
+    Tiap jenis menafsirkan jawabannya sendiri: `pilihan_ganda` hanya menerima
+    indeks opsi, sedangkan `benar_salah` juga menerima boolean dan teks
+    (lihat `_indeks_benar_salah`). Menyeragamkannya justru salah — boolean
+    `true` bukan "opsi nomor 1", melainkan "Benar", yaitu opsi nomor 0.
 
     Jawaban yang tidak dikenali dihitung SALAH di sini — berbeda dari kuis di
     dalam chat, yang menanyakan ulang. Pada evaluasi resmi, menanyakan ulang
@@ -201,7 +252,10 @@ def grade_objective(item: dict[str, Any], answer: Any, index: int) -> GradedItem
     """
     tipe = item.get("type", "pilihan_ganda")
     benar = item.get("answer_index")
-    dipilih = answer if isinstance(answer, int) else None
+    dipilih = (
+        _indeks_benar_salah(answer) if tipe == "benar_salah"
+        else _indeks_pilihan(answer)
+    )
     tepat = dipilih is not None and dipilih == benar
     return GradedItem(
         index=index,

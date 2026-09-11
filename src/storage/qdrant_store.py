@@ -54,6 +54,44 @@ _UPSERT_BATCH = 64
 # indeks bertanda tenant di Qdrant.
 TENANT_FIELD = "tenant_id"
 
+# Jalur pencarian yang benar-benar dipakai satu panggilan `search()`. Nilainya
+# ikut keluar bersama tiap hasil supaya pemanggil (dan metrik di atasnya) dapat
+# membedakan hibrida dari dense — lihat `search()`.
+SEARCH_MODE_HYBRID = "hybrid"          # fusi RRF dense + sparse, jalur normal
+SEARCH_MODE_DENSE = "dense"            # dense-only, memang diminta begitu
+SEARCH_MODE_DENSE_FALLBACK = "dense_fallback"  # hibrida diminta tetapi gagal
+
+
+def _kunci_urut_materi(payload: dict) -> tuple[int, str, int, int]:
+    """Kunci urut potongan materi: minggu → berkas → indeks potongan → halaman.
+
+    Nilai yang hilang dipetakan ke 0/"" — payload lama boleh saja belum membawa
+    `page_number`, dan membandingkan None dengan int akan melempar TypeError
+    tepat di jalur yang seharusnya cuma merapikan urutan.
+    """
+    return (
+        int(payload.get("week") or 0),
+        str(payload.get("source_file") or ""),
+        int(payload.get("chunk_index") or 0),
+        int(payload.get("page_number") or 0),
+    )
+
+
+def _penanda_sumber(payload: dict) -> str:
+    """Penanda asal potongan, mis. `[Minggu 3 · bab3.pdf · hlm. 21]`.
+
+    Kosong bila payload tidak membawa satu pun metadata sumber; pemanggil
+    melewatinya alih-alih menyisipkan kurung siku hampa ke dalam prompt.
+    """
+    bagian: list[str] = []
+    if payload.get("week") is not None:
+        bagian.append(f"Minggu {payload['week']}")
+    if payload.get("source_file"):
+        bagian.append(str(payload["source_file"]))
+    if payload.get("page_number") is not None:
+        bagian.append(f"hlm. {payload['page_number']}")
+    return f"[{' · '.join(bagian)}]" if bagian else ""
+
 
 class QdrantStore:
     """Thin async wrapper around qdrant-client for our chunk schema."""
@@ -69,6 +107,11 @@ class QdrantStore:
         self._enable_sparse = (
             enable_sparse if enable_sparse is not None else settings.enable_hybrid_search
         )
+        # Pencacah jalur pencarian per instans, dibaca oleh pemantauan/uji.
+        # Dibutuhkan karena penanda per hasil ikut hilang ketika pencarian tidak
+        # mengembalikan apa pun — justru keadaan yang paling mungkin muncul saat
+        # fusi hibrida sedang gagal.
+        self.search_mode_counts: dict[str, int] = {}
 
     @staticmethod
     def _build_client() -> QdrantClient:
@@ -223,7 +266,19 @@ class QdrantStore:
             tenant_id: WAJIB. Pemilik data yang boleh dicari.
 
         Returns:
-            List of dicts: {"chunk_id", "score", "payload"}.
+            List of dicts: {"chunk_id", "score", "payload", "retrieval_mode"}.
+
+            `retrieval_mode` menyebut jalur yang BENAR-BENAR dipakai
+            (SEARCH_MODE_HYBRID / SEARCH_MODE_DENSE / SEARCH_MODE_DENSE_FALLBACK),
+            bukan yang diminta. Sebelumnya kegagalan fusi hibrida hanya
+            meninggalkan satu baris log yang hilang bersama rotasinya, sementara
+            bentuk hasilnya identik dengan hibrida yang berhasil — sistem bisa
+            berminggu-minggu berjalan dense-only tanpa satu metrik pun
+            menangkapnya. Medan ini bersifat tambahan: pemanggil lama yang hanya
+            membaca "payload"/"score" tidak terpengaruh.
+
+            Untuk permintaan yang hasilnya kosong, cacahnya tetap terekam di
+            `self.search_mode_counts`.
         """
         tenant_id = require_tenant_id(tenant_id, operation="search")
         top_k = top_k or settings.retrieval_top_k
@@ -233,6 +288,7 @@ class QdrantStore:
         )
 
         use_hybrid = self._enable_sparse and sparse_vector is not None
+        mode = SEARCH_MODE_HYBRID if use_hybrid else SEARCH_MODE_DENSE
         result = None
         if use_hybrid:
             assert sparse_vector is not None
@@ -266,6 +322,8 @@ class QdrantStore:
                 # when the IDF-modified sparse index has no entries yet — e.g. a
                 # collection with zero sparse-indexed points. Degrade gracefully
                 # to dense-only instead of surfacing a 500 to the caller.
+                # Degradasinya ditandai supaya tidak berhenti di log saja.
+                mode = SEARCH_MODE_DENSE_FALLBACK
                 logger.warning(
                     "Hybrid search unavailable ({}); falling back to dense-only", exc
                 )
@@ -281,11 +339,13 @@ class QdrantStore:
                 with_payload=True,
             )
 
+        self.search_mode_counts[mode] = self.search_mode_counts.get(mode, 0) + 1
         return [
             {
                 "chunk_id": str(p.id),
                 "score": float(p.score),
                 "payload": dict(p.payload or {}),
+                "retrieval_mode": mode,
             }
             for p in result.points
         ]
@@ -455,10 +515,22 @@ class QdrantStore:
         self, course_id: str, weeks: list[int], max_chars: int = 6000,
         *, tenant_id: str,
     ) -> str:
-        """Gabungan teks materi pada minggu-minggu tertentu.
+        """Gabungan teks materi pada minggu-minggu tertentu, terurut dan bersumber.
 
-        Dipakai untuk menyimpulkan topik apa yang dibahas minggu itu, sehingga
-        chatbot dapat menyebut isinya alih-alih hanya menampilkan nama berkas.
+        Dipakai untuk menyimpulkan topik minggu dan untuk menyusun soal evaluasi.
+        Dua hal menentukan kualitas keluarannya:
+
+        1. URUTAN. `scroll` memberi titik dalam urutan penyimpanan, bukan urutan
+           baca. Tanpa diurutkan, minggu 4 bisa mendahului minggu 3 dan bab
+           penutup mendahului pendahuluan — lalu dipangkas di `max_chars`,
+           sehingga yang sampai ke model adalah cuplikan acak, bukan awal
+           materi. Kuncinya minggu → berkas → indeks potongan, yaitu urutan
+           seperti mahasiswa membacanya; minggu didahulukan agar beberapa minggu
+           yang diminta sekaligus tetap datang berurutan, bukan berselang-seling.
+        2. SUMBER. Nomor halaman ikut sebagai penanda di depan tiap kelompok
+           potongan. Model diminta menjelaskan jawaban sambil merujuk lokasi
+           ("lihat slide 21"); kalau nomor halaman tidak pernah ikut, rujukan
+           semacam itu hanya bisa dikarang.
         """
         tenant_id = require_tenant_id(tenant_id, operation="get_week_text")
         if not weeks:
@@ -466,13 +538,25 @@ class QdrantStore:
         qfilter = self._build_filter(
             tenant_id=tenant_id, course_id=course_id, weeks=weeks,
         )
-        payloads = await self._scroll_payloads(["text", "source_file"], qfilter)
+        payloads = await self._scroll_payloads(
+            ["text", "source_file", "week", "page_number", "chunk_index"], qfilter,
+        )
+        payloads.sort(key=_kunci_urut_materi)
         potongan: list[str] = []
         total = 0
+        penanda_terakhir: str | None = None
         for p in payloads:
             teks = (p.get("text") or "").strip()
             if not teks:
                 continue
+            penanda = _penanda_sumber(p)
+            # Penanda ditulis hanya saat sumbernya berpindah: mengulangnya di
+            # setiap potongan satu halaman yang sama hanya memakan jatah
+            # max_chars yang seharusnya berisi materi.
+            if penanda and penanda != penanda_terakhir:
+                potongan.append(penanda)
+                total += len(penanda)
+                penanda_terakhir = penanda
             potongan.append(teks)
             total += len(teks)
             if total >= max_chars:
@@ -544,6 +628,57 @@ class QdrantStore:
         )
         logger.info(
             "Deleted chunks for source_file='{}' (tenant={})", source_file, tenant_id,
+        )
+
+    async def delete_stale_chunks(
+        self,
+        source_file: str,
+        content_id: str | None,
+        keep_ids: Sequence[str],
+        *,
+        tenant_id: str,
+    ) -> None:
+        """Hapus potongan lama satu berkas di satu cakupan, kecuali `keep_ids`.
+
+        Dipanggil SESUDAH potongan hasil indeks ulang tertulis. `chunk_id` dibuat
+        acak oleh chunker, jadi upsert tidak pernah menimpa titik lama — tanpa
+        pembersihan ini setiap indeks ulang menggandakan seluruh potongan berkas
+        itu (terukur: 8 kelompok teks kembar di satu cakupan yang sama). Urutan
+        tulis-lalu-hapus dipilih ketimbang hapus-lalu-tulis: bila penulisan gagal
+        di tengah, materi lama masih utuh, bukan hilang dari index.
+
+        Cakupannya tenant + `content_id` + nama berkas, BUKAN nama berkas saja.
+        Berkas yang sama sah terindeks di beberapa `content_id` (slide dipakai di
+        dua minggu atau dua mata kuliah); menghapus per nama berkas akan ikut
+        menyapu salinan-salinan itu. `content_id` bernilai None dicocokkan sebagai
+        "kosong", bukan diabaikan, dengan alasan yang sama.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="delete_stale_chunks")
+        if not keep_ids:
+            # Daftar kosong berarti "hapus semua di cakupan ini". Itu bukan
+            # pembersihan, itu penghapusan materi — harus lewat delete_by_source.
+            raise ValueError("keep_ids kosong: menolak menghapus seluruh cakupan")
+
+        qfilter = self._build_filter(
+            tenant_id=tenant_id, source_filter=source_file, content_id=content_id,
+        )
+        if not content_id:
+            # IsEmpty, bukan IsNull: cocok baik saat kuncinya tersimpan sebagai
+            # null maupun saat kuncinya tidak ada sama sekali di payload.
+            qfilter.must.append(  # type: ignore[union-attr]
+                qm.IsEmptyCondition(is_empty=qm.PayloadField(key="content_id"))
+            )
+        qfilter.must_not = [qm.HasIdCondition(has_id=list(keep_ids))]
+
+        await asyncio.to_thread(
+            self._client.delete,
+            collection_name=self._collection,
+            points_selector=qm.FilterSelector(filter=qfilter),
+        )
+        logger.info(
+            "Membersihkan potongan basi source_file='{}' content_id={} (tenant={}), "
+            "menyisakan {} potongan baru",
+            source_file, content_id, tenant_id, len(keep_ids),
         )
 
     async def delete_tenant_data(self, *, tenant_id: str) -> None:

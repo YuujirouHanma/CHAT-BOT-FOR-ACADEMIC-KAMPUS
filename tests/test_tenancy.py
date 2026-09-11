@@ -404,6 +404,7 @@ class TestQdrantFilterSelaluBertenant:
             ("get_material_text", ("c1", "bab1.pdf")),
             ("list_indexed_files", ()),
             ("delete_by_source", ("bab1.pdf",)),
+            ("delete_stale_chunks", ("bab1.pdf", "c1", ["id-baru"])),
             ("delete_tenant_data", ()),
         ],
     )
@@ -562,19 +563,52 @@ class TestGenCacheIsolation:
         Setelah tersimpan, isi cache tidak pernah melewati Qdrant lagi — jadi
         kunci cache-lah satu-satunya yang memisahkan kedua tenant.
         """
-        gen_cache.save("quiz", "sbd-minggu-1", "bab1.pdf", ["soal A"], tenant_id=A)
-        assert gen_cache.load("quiz", "sbd-minggu-1", "bab1.pdf", tenant_id=A) == ["soal A"]
-        assert gen_cache.load("quiz", "sbd-minggu-1", "bab1.pdf", tenant_id=B) is None
+        H = gen_cache.hash_material("isi bab 1")
+        gen_cache.save(
+            "quiz", "sbd-minggu-1", "bab1.pdf", ["soal A"], tenant_id=A, material_hash=H,
+        )
+        assert gen_cache.load(
+            "quiz", "sbd-minggu-1", "bab1.pdf", tenant_id=A, material_hash=H,
+        ) == ["soal A"]
+        assert gen_cache.load(
+            "quiz", "sbd-minggu-1", "bab1.pdf", tenant_id=B, material_hash=H,
+        ) is None
 
     def test_kedua_tenant_menyimpan_versinya_sendiri(self) -> None:
-        gen_cache.save("starter", "c1", "f.pdf", ["A"], tenant_id=A)
-        gen_cache.save("starter", "c1", "f.pdf", ["B"], tenant_id=B)
-        assert gen_cache.load("starter", "c1", "f.pdf", tenant_id=A) == ["A"]
-        assert gen_cache.load("starter", "c1", "f.pdf", tenant_id=B) == ["B"]
+        H = gen_cache.hash_material("isi f.pdf")
+        gen_cache.save("starter", "c1", "f.pdf", ["A"], tenant_id=A, material_hash=H)
+        gen_cache.save("starter", "c1", "f.pdf", ["B"], tenant_id=B, material_hash=H)
+        assert gen_cache.load(
+            "starter", "c1", "f.pdf", tenant_id=A, material_hash=H,
+        ) == ["A"]
+        assert gen_cache.load(
+            "starter", "c1", "f.pdf", tenant_id=B, material_hash=H,
+        ) == ["B"]
+
+    def test_materi_berubah_membatalkan_entri_lama(self) -> None:
+        """Sidik jari materi ikut jadi kunci, jadi entri lama berhenti terpakai.
+
+        Ini yang menjaga agar perbaikan pada perakit teks materi benar-benar
+        terasa: tanpa sidik jari, soal yang disusun dari materi versi lama akan
+        terus tersaji meski materinya sudah diperbaiki.
+        """
+        lama = gen_cache.hash_material("materi versi lama")
+        baru = gen_cache.hash_material("materi versi baru")
+        gen_cache.save(
+            "quiz", "c1", "f.pdf", ["soal lama"], tenant_id=A, material_hash=lama,
+        )
+        assert gen_cache.load(
+            "quiz", "c1", "f.pdf", tenant_id=A, material_hash=lama,
+        ) == ["soal lama"]
+        assert gen_cache.load(
+            "quiz", "c1", "f.pdf", tenant_id=A, material_hash=baru,
+        ) is None
 
     def test_tanpa_tenant_gagal(self) -> None:
         with pytest.raises(TenantScopeError):
-            gen_cache.load("quiz", "c1", "f.pdf", tenant_id="")
+            gen_cache.load(
+                "quiz", "c1", "f.pdf", tenant_id="", material_hash=gen_cache.hash_material("x"),
+            )
 
 
 # --- session ---------------------------------------------------------------

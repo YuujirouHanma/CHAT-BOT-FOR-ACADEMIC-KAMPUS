@@ -11,7 +11,13 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.schemas import Chunk, ElementType
-from src.storage.qdrant_store import TENANT_FIELD, QdrantStore
+from src.storage.qdrant_store import (
+    SEARCH_MODE_DENSE,
+    SEARCH_MODE_DENSE_FALLBACK,
+    SEARCH_MODE_HYBRID,
+    TENANT_FIELD,
+    QdrantStore,
+)
 from tests.conftest import TEST_TENANT_ID as TENANT
 
 
@@ -314,7 +320,86 @@ class TestSearch:
         assert "prefetch" in first_kwargs
         assert second_kwargs.get("using") == "dense"
         assert "prefetch" not in second_kwargs
-        assert results == [{"chunk_id": "c1", "score": 0.5, "payload": {"text": "hi"}}]
+        assert results == [{
+            "chunk_id": "c1", "score": 0.5, "payload": {"text": "hi"},
+            "retrieval_mode": SEARCH_MODE_DENSE_FALLBACK,
+        }]
+
+    @pytest.mark.asyncio
+    async def test_dense_fallback_is_visible_to_caller(self) -> None:
+        """Regresi: degradasi diam-diam ke dense-only.
+
+        Kegagalan fusi hibrida dulu hanya meninggalkan satu baris log sementara
+        hasilnya berbentuk persis sama dengan hibrida yang berhasil — tidak ada
+        satu pun medan yang bisa dipantau, jadi sistem dapat berjalan dense-only
+        berminggu-minggu tanpa ketahuan.
+        """
+        client, store = _make_client_and_store()
+        client.query_points.side_effect = [
+            KeyError("sparse"),
+            SimpleNamespace(
+                points=[SimpleNamespace(id="c1", score=0.5, payload={"text": "hi"})]
+            ),
+        ]
+
+        results = await store.search(
+            dense_vector=[0.1] * 1024, sparse_vector={5: 0.5}, top_k=5,
+            tenant_id=TENANT,
+        )
+
+        assert results[0]["retrieval_mode"] == SEARCH_MODE_DENSE_FALLBACK
+        assert store.search_mode_counts == {SEARCH_MODE_DENSE_FALLBACK: 1}
+
+    @pytest.mark.asyncio
+    async def test_successful_hybrid_is_marked_hybrid(self) -> None:
+        client, store = _make_client_and_store()
+        client.query_points.return_value = SimpleNamespace(
+            points=[SimpleNamespace(id="c1", score=0.9, payload={"text": "hi"})]
+        )
+
+        results = await store.search(
+            dense_vector=[0.1] * 1024, sparse_vector={5: 0.5}, top_k=5,
+            tenant_id=TENANT,
+        )
+
+        assert results[0]["retrieval_mode"] == SEARCH_MODE_HYBRID
+        assert store.search_mode_counts == {SEARCH_MODE_HYBRID: 1}
+
+    @pytest.mark.asyncio
+    async def test_intentional_dense_differs_from_degradation(self) -> None:
+        """Dense yang memang diminta tidak boleh tercampur dengan dense hasil
+        kegagalan — kalau keduanya bernama sama, metriknya kehilangan artinya."""
+        client, store = _make_client_and_store(enable_sparse=False)
+        client.query_points.return_value = SimpleNamespace(
+            points=[SimpleNamespace(id="c1", score=0.9, payload={"text": "hi"})]
+        )
+
+        results = await store.search(
+            dense_vector=[0.1] * 1024, sparse_vector={5: 0.5}, top_k=5,
+            tenant_id=TENANT,
+        )
+
+        assert results[0]["retrieval_mode"] == SEARCH_MODE_DENSE
+        assert store.search_mode_counts == {SEARCH_MODE_DENSE: 1}
+
+    @pytest.mark.asyncio
+    async def test_mode_counted_even_when_no_results(self) -> None:
+        """Hasil kosong adalah keadaan yang paling mungkin terjadi saat fusi
+        gagal; penanda per hasil ikut hilang di situ, jadi cacahnya yang harus
+        tetap merekam degradasinya."""
+        client, store = _make_client_and_store()
+        client.query_points.side_effect = [
+            KeyError("sparse"),
+            SimpleNamespace(points=[]),
+        ]
+
+        results = await store.search(
+            dense_vector=[0.1] * 1024, sparse_vector={5: 0.5}, top_k=5,
+            tenant_id=TENANT,
+        )
+
+        assert results == []
+        assert store.search_mode_counts == {SEARCH_MODE_DENSE_FALLBACK: 1}
 
 
 class TestCatalogAggregation:
@@ -409,6 +494,113 @@ class TestCatalogAggregation:
 
         assert text.startswith("first")
         assert "second" in text
+
+    @pytest.mark.asyncio
+    async def test_get_week_text_orders_by_week_file_and_chunk(self) -> None:
+        """Regresi: potongan digabung dalam urutan sembarang dari scroll.
+
+        Urutan penyimpanan bukan urutan baca, dan hasilnya dipangkas di
+        max_chars — tanpa pengurutan, yang sampai ke pembangkit soal hanyalah
+        cuplikan acak, bukan awal materi minggu itu.
+        """
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"text": "m4 awal", "week": 4, "source_file": "b.pdf",
+                 "chunk_index": 0, "page_number": 1},
+                {"text": "m3 akhir", "week": 3, "source_file": "a.pdf",
+                 "chunk_index": 1, "page_number": 2},
+                {"text": "m3 awal", "week": 3, "source_file": "a.pdf",
+                 "chunk_index": 0, "page_number": 1},
+            ]),
+            None,
+        )
+
+        text = await store.get_week_text("sbd", [3, 4], tenant_id=TENANT)
+
+        assert text.index("m3 awal") < text.index("m3 akhir") < text.index("m4 awal")
+
+    @pytest.mark.asyncio
+    async def test_get_week_text_carries_page_and_source(self) -> None:
+        """Regresi: metadata sumber diminta tetapi tidak pernah dipakai.
+
+        Nomor halaman tidak pernah sampai ke model, sehingga penjelasan soal
+        yang berbunyi "sesuai penjelasan di slide 21" hanya bisa dikarang.
+        """
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"text": "isi slide", "week": 3, "source_file": "bab3.pdf",
+                 "chunk_index": 0, "page_number": 21},
+            ]),
+            None,
+        )
+
+        text = await store.get_week_text("sbd", [3], tenant_id=TENANT)
+
+        assert "bab3.pdf" in text
+        assert "21" in text
+        assert "Minggu 3" in text
+        assert "isi slide" in text
+        # Metadata yang dipakai memang harus ikut diminta dari Qdrant.
+        diminta = client.scroll.call_args.kwargs["with_payload"]
+        assert {"page_number", "week", "chunk_index"} <= set(diminta)
+
+    @pytest.mark.asyncio
+    async def test_get_week_text_repeats_marker_only_on_source_change(self) -> None:
+        """Penanda yang diulang di tiap potongan satu halaman hanya memakan
+        jatah max_chars yang seharusnya berisi materi."""
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"text": "satu", "week": 3, "source_file": "a.pdf",
+                 "chunk_index": 0, "page_number": 1},
+                {"text": "dua", "week": 3, "source_file": "a.pdf",
+                 "chunk_index": 1, "page_number": 1},
+                {"text": "tiga", "week": 3, "source_file": "a.pdf",
+                 "chunk_index": 2, "page_number": 2},
+            ]),
+            None,
+        )
+
+        text = await store.get_week_text("sbd", [3], tenant_id=TENANT)
+
+        assert text.count("[Minggu 3 · a.pdf · hlm. 1]") == 1
+        assert text.count("[Minggu 3 · a.pdf · hlm. 2]") == 1
+
+    @pytest.mark.asyncio
+    async def test_get_week_text_tolerates_missing_metadata(self) -> None:
+        """Payload lama boleh belum membawa week/page_number; urutannya tetap
+        harus terbentuk, bukan meledak saat None dibandingkan dengan int."""
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"text": "kedua", "chunk_index": 1},
+                {"text": "pertama"},
+            ]),
+            None,
+        )
+
+        text = await store.get_week_text("sbd", [3], tenant_id=TENANT)
+
+        assert text.index("pertama") < text.index("kedua")
+        assert not text.startswith("[")
+
+    @pytest.mark.asyncio
+    async def test_get_week_text_caps_at_max_chars(self) -> None:
+        client, store = _make_client_and_store()
+        client.scroll.return_value = (
+            self._points([
+                {"text": "x" * 100, "week": 3, "source_file": "a.pdf",
+                 "chunk_index": i, "page_number": i}
+                for i in range(10)
+            ]),
+            None,
+        )
+
+        text = await store.get_week_text("sbd", [3], max_chars=120, tenant_id=TENANT)
+
+        assert len(text) <= 120
 
 
 class TestDeleteBySource:

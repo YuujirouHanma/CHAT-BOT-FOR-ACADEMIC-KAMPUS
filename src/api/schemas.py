@@ -426,7 +426,15 @@ class EvaluationQuestionsResponse(BaseModel):
 class EvaluationSubmitRequest(_EvaluationTarget):
     # Urut sesuai soal. Objektif berupa indeks opsi (int); isian/esai/koding
     # berupa teks. None berarti tidak dijawab.
-    answers: list[int | str | None] = Field(default_factory=list, max_length=40)
+    #
+    # `bool` WAJIB berdiri di depan `int` pada union ini. Soal benar/salah
+    # secara alami dikirim klien sebagai `true`/`false`, dan tanpa `bool` di
+    # depan pydantic memaksanya menjadi int di batas skema — `true` menjadi 1,
+    # yang di urutan opsi ["Benar", "Salah"] justru berarti "Salah". Penilaian
+    # jadi terbalik sebelum jawabannya sempat sampai ke `grade_objective`.
+    answers: list[bool | int | str | None] = Field(
+        default_factory=list, max_length=40,
+    )
 
 
 class GradedItemInfo(BaseModel):

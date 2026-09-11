@@ -24,6 +24,32 @@ from src.tenancy import require_tenant_id
 from src.utils.logger import logger
 
 
+def _dedupe_identical_text(candidates: list[dict]) -> list[dict]:
+    """Buang kandidat yang teksnya identik dengan kandidat berperingkat lebih tinggi.
+
+    Materi yang sama sah terindeks di lebih dari satu cakupan — deck yang dipakai
+    ulang di dua minggu, atau di dua mata kuliah (lihat keputusan cakupan di
+    src/ingestion/dedup.py). Saat kueri tidak dipersempit ke satu materi, salinan
+    itu ikut terambil bersama dan berebut lima slot bukti: terukur rata-rata hanya
+    3,6 dari 5 slot berisi potongan yang benar-benar berbeda. Setiap salinan juga
+    menambah ±1,96 detik rerank CPU tanpa menambah informasi apa pun.
+
+    Pembanding memakai teks yang spasinya dinormalkan, bukan `chunk_id`: titik
+    kembar punya ID berbeda. Urutan tahap pertama dipertahankan, sehingga yang
+    bertahan adalah salinan berperingkat tertinggi.
+    """
+    terlihat: set[str] = set()
+    hasil: list[dict] = []
+    for c in candidates:
+        teks = " ".join(((c.get("payload") or {}).get("text") or "").split())
+        if teks and teks in terlihat:
+            continue
+        if teks:
+            terlihat.add(teks)
+        hasil.append(c)
+    return hasil
+
+
 class HybridRetriever:
     """End-to-end retrieval: embed → vector search → rerank.
 
@@ -108,6 +134,27 @@ class HybridRetriever:
         if not candidates:
             logger.warning("Vector search returned no candidates")
             return []
+
+        # Qdrant bisa jatuh ke dense-only ketika indeks sparse-nya belum siap,
+        # dan itu terjadi tanpa galat. Tanpa catatan di sini, sistem dapat
+        # berjalan berminggu-minggu tanpa jalur leksikal sama sekali sementara
+        # metriknya tampak wajar — mahal justru untuk kueri berbahasa Indonesia,
+        # yang paling bergantung pada pencocokan istilah.
+        mode = candidates[0].get("retrieval_mode")
+        if mode and mode != "hybrid":
+            logger.warning(
+                "Temu-kembali berjalan mode '{}', bukan hibrida — jalur sparse "
+                "tidak ikut menentukan {} kandidat ini",
+                mode, len(candidates),
+            )
+
+        unik = _dedupe_identical_text(candidates)
+        if len(unik) < len(candidates):
+            logger.info(
+                "Membuang {} kandidat bertek identik sebelum rerank ({} → {})",
+                len(candidates) - len(unik), len(candidates), len(unik),
+            )
+        candidates = unik
 
         reranked = await self._reranker.rerank(
             query=cleaned_query,

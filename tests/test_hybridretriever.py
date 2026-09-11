@@ -109,3 +109,32 @@ class TestHybridRetriever:
 
         assert search.call_args.kwargs["top_k"] == 50
         assert rerank.call_args.kwargs["top_k"] == 3
+
+class TestDedupeIdenticalText:
+    """Salinan sah lintas cakupan tidak boleh berebut slot bukti."""
+
+    @pytest.mark.asyncio
+    async def test_kandidat_bertek_identik_dibuang_sebelum_rerank(self) -> None:
+        candidates = [
+            _candidate("minggu3", score=0.9, text="Perulangan for  mengulang blok."),
+            _candidate("minggu7", score=0.8, text="Perulangan for mengulang blok."),
+            _candidate("lain", score=0.7, text="While berhenti saat kondisi salah."),
+        ]
+        retriever, _, _, rerank = _make_retriever(candidates=candidates, reranked=[])
+
+        await retriever.retrieve("apa itu for?", tenant_id=TEST_TENANT_ID)
+
+        dikirim = rerank.await_args.kwargs["candidates"]
+        assert [c["chunk_id"] for c in dikirim] == ["minggu3", "lain"], (
+            "salinan berspasi beda harus dianggap sama, dan yang bertahan "
+            "adalah yang berperingkat tertinggi di tahap pertama"
+        )
+
+    @pytest.mark.asyncio
+    async def test_kandidat_berbeda_tidak_disentuh(self) -> None:
+        candidates = [_candidate("a", text="satu"), _candidate("b", text="dua")]
+        retriever, _, _, rerank = _make_retriever(candidates=candidates, reranked=[])
+
+        await retriever.retrieve("q", tenant_id=TEST_TENANT_ID)
+
+        assert len(rerank.await_args.kwargs["candidates"]) == 2
