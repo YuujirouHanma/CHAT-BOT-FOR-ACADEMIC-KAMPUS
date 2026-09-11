@@ -181,10 +181,22 @@ def _assemble_elements(
             continue
 
         text = (getattr(el, "text", "") or "").strip()
-        if text:
-            text_buffer.append(text)
-            if buffer_page is None:
-                buffer_page = page
+        if not text:
+            continue
+
+        # Ganti halaman = batas elemen. Tanpa ini seluruh dokumen menumpuk
+        # menjadi SATU elemen: `flush_text()` hanya terpanggil saat bertemu
+        # tabel atau gambar, dan slide kuliah kerap tidak punya keduanya.
+        # Akibatnya dua hal sekaligus — nomor halaman seluruh dokumen tercatat
+        # sebagai halaman pertama sehingga sitasi `sources` tidak dapat
+        # diperiksa mahasiswa, dan potongan hasil chunking membentang lintas
+        # slide yang tidak berhubungan sehingga pencarian kehilangan ketepatan.
+        if buffer_page is not None and page is not None and page != buffer_page:
+            flush_text()
+
+        text_buffer.append(text)
+        if buffer_page is None:
+            buffer_page = page
 
     flush_text()
     return parsed

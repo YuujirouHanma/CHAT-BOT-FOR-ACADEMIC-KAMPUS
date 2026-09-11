@@ -133,6 +133,55 @@ class TestParser:
         assert "research" in result[0].content
         assert result[0].page_number == 1
 
+    def test_page_change_breaks_text_buffer(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Teks dari halaman berbeda tidak boleh menyatu jadi satu elemen.
+
+        Sebelum ini `flush_text()` hanya terpanggil saat bertemu tabel atau
+        gambar. Slide kuliah kerap tidak punya keduanya, sehingga SATU PDF
+        24 halaman menjadi SATU elemen bernomor halaman 1 — sitasi `sources`
+        jadi tidak dapat diperiksa mahasiswa, dan potongan hasil chunking
+        membentang lintas slide yang tidak berhubungan.
+        """
+        elements = [
+            _fake_title("Percabangan", page_number=1),
+            _fake_narrative("if, elif, else.", page_number=1),
+            _fake_title("Perulangan", page_number=2),
+            _fake_narrative("for dan while.", page_number=2),
+            _fake_narrative("Contoh range().", page_number=3),
+        ]
+        _patch_partition(monkeypatch, elements)
+
+        result = parse_document(self._real_file(tmp_path))
+
+        assert len(result) == 3
+        assert [e.page_number for e in result] == [1, 2, 3]
+        assert "Percabangan" in result[0].content
+        assert "Perulangan" in result[1].content
+        assert "range()" in result[2].content
+        # Isi halaman berbeda tidak bocor ke elemen tetangganya.
+        assert "Perulangan" not in result[0].content
+
+    def test_halaman_tanpa_nomor_tetap_menumpuk(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Sumber tanpa nomor halaman — transkrip audio — tetap satu elemen.
+
+        Memecah pada `None` akan memecah tiap baris transkrip menjadi elemen
+        sendiri, dan potongan sekecil itu kehilangan konteks saat dicari.
+        """
+        elements = [
+            _fake_narrative("Bagian pertama rekaman.", page_number=None),
+            _fake_narrative("Bagian kedua rekaman.", page_number=None),
+        ]
+        _patch_partition(monkeypatch, elements)
+
+        result = parse_document(self._real_file(tmp_path))
+
+        assert len(result) == 1
+        assert "pertama" in result[0].content and "kedua" in result[0].content
+
     def test_table_breaks_text_buffer(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
