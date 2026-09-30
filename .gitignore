@@ -1,5 +1,10 @@
 # Environment & secrets
 .env
+# Salinan cadangan .env memuat kunci OpenRouter, Groq, OpenAI, dan
+# TENANT_KEY_PEPPER. Pola '.env' saja tidak menjangkaunya, dan berkas
+# semacam ini lahir setiap kali konfigurasi disalin sebelum diubah.
+.env.*
+!.env.example
 .envrc
 
 # Python
@@ -116,7 +121,12 @@ data/validation/
 pyrightconfig.json
 
 # Repo eksternal yang di-clone lokal (jangan masuk ke repo ini)
+#
+# Keduanya milik tim lain dan punya .git sendiri. Ditaruh di dalam folder ini
+# semata agar mudah dibandingkan berdampingan; menyuntingnya berarti menyunting
+# repo MEREKA, dan commit di sana tidak pernah menyentuh riwayat repo ini.
 RAG-Research/
+sevima-be/
 
 # Misc
 .abstra/
