@@ -5,6 +5,9 @@
                                           [--scopes chat:ask,catalog:read]
                                           [--courses sbd,kka]
     python -m scripts.tenantctl list
+    python -m scripts.tenantctl schedule <tenant_id>
+    python -m scripts.tenantctl schedule <tenant_id> --set "4:kuis:1-4,7:ets:1-7"
+    python -m scripts.tenantctl schedule <tenant_id> --reset
     python -m scripts.tenantctl revoke <tenant_id> <key_id>
     python -m scripts.tenantctl suspend <tenant_id>
     python -m scripts.tenantctl activate <tenant_id>
@@ -22,6 +25,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src import evaluation  # noqa: E402
 from src.security import audit  # noqa: E402
 from src.storage import tenant_store  # noqa: E402
 from src.tenancy import ALL_SCOPES, READER_SCOPES, TenantQuota  # noqa: E402
@@ -94,6 +98,72 @@ def cmd_list(_: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_schedule_spec(spec: str) -> evaluation.EvaluationSchedule:
+    """Ubah "4:kuis:1-4,7:ets:1-7" menjadi jadwal yang sudah tervalidasi.
+
+    Bentuk teks ini hanya kulit CLI; keabsahannya diputuskan oleh
+    `EvaluationSchedule.from_json` yang sama dengan yang dipakai saat berkas
+    tenant dimuat — supaya tidak ada jadwal yang lolos lewat CLI tetapi ditolak
+    saat server membacanya (atau sebaliknya).
+    """
+    entri: list[dict[str, object]] = []
+    for bagian in spec.split(","):
+        bagian = bagian.strip()
+        if not bagian:
+            continue
+        potong = bagian.split(":")
+        if len(potong) != 3:
+            raise ValueError(
+                f"Bentuk '{bagian}' tidak dikenali; pakai minggu:jenis:awal-akhir"
+            )
+        minggu, jenis, rentang = (p.strip() for p in potong)
+        if "-" not in rentang:
+            raise ValueError(f"Rentang '{rentang}' harus ditulis awal-akhir")
+        awal, _, akhir = rentang.partition("-")
+        try:
+            angka = [int(minggu), int(awal), int(akhir)]
+        except ValueError as exc:
+            raise ValueError(f"Angka minggu tidak sah pada '{bagian}'") from exc
+        entri.append({"week": angka[0], "kind": jenis, "covers": angka[1:]})
+    return evaluation.EvaluationSchedule.from_json(entri)
+
+
+def _print_schedule(tenant: tenant_store.Tenant) -> None:
+    jadwal = tenant.evaluation_schedule
+    asal = "sendiri" if jadwal else "bawaan (tenant belum menentukan)"
+    print(f"Jadwal evaluasi '{tenant.tenant_id}' — {asal}:")
+    rencana = evaluation.plans_for(jadwal)
+    for w in sorted(rencana):
+        p = rencana[w]
+        print(f"  minggu {w:<3} {p.label:28} menguji {p.range_text:16} "
+              f"{p.blueprint.total} soal {p.blueprint.counts}")
+
+
+def cmd_schedule(args: argparse.Namespace) -> int:
+    """Tampilkan, tetapkan, atau kembalikan kalender evaluasi sebuah tenant."""
+    tenant = tenant_store.get(args.tenant_id)
+    if tenant is None:
+        print("Tenant tidak ditemukan.", file=sys.stderr)
+        return 1
+
+    if args.set and args.reset:
+        print("Pilih salah satu: --set atau --reset.", file=sys.stderr)
+        return 1
+
+    if args.set or args.reset:
+        try:
+            baru = _parse_schedule_spec(args.set) if args.set else None
+        except ValueError as exc:
+            print(f"Jadwal tidak sah: {exc}", file=sys.stderr)
+            return 1
+        tenant_store.set_schedule(args.tenant_id, baru)
+        tenant = tenant_store.get(args.tenant_id)
+        assert tenant is not None
+
+    _print_schedule(tenant)
+    return 0
+
+
 def cmd_revoke(args: argparse.Namespace) -> int:
     if tenant_store.revoke_key(args.tenant_id, args.key_id):
         print(f"Kunci {args.key_id} dicabut.")
@@ -148,6 +218,17 @@ def main() -> int:
     k.set_defaults(fn=cmd_issue_key)
 
     sub.add_parser("list", help="Daftar tenant & kunci").set_defaults(fn=cmd_list)
+
+    j = sub.add_parser("schedule", help="Lihat/atur kalender evaluasi tenant")
+    j.add_argument("tenant_id")
+    j.add_argument(
+        "--set", default="",
+        help="jadwal kampus, mis. \"4:kuis:1-4,7:ets:1-7,11:kuis:8-11,14:eas:8-14\"",
+    )
+    j.add_argument(
+        "--reset", action="store_true", help="kembalikan ke jadwal bawaan",
+    )
+    j.set_defaults(fn=cmd_schedule)
 
     r = sub.add_parser("revoke", help="Cabut satu kunci")
     r.add_argument("tenant_id")

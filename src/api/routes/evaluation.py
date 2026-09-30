@@ -49,11 +49,13 @@ def _plan_info(p: evaluation_mod.EvaluationPlan) -> EvaluationPlanInfo:
 def _resolve_plan(
     week: int | None, weeks: list[int] | None, kind: str | None,
     counts: dict[str, int] | None,
+    schedule: evaluation_mod.EvaluationSchedule | None,
 ) -> evaluation_mod.EvaluationPlan:
     """Tentukan rencana evaluasi dari permintaan klien.
 
-    `week` memakai jadwal bawaan; `weeks` membuat rentang bebas. Salah satunya
-    wajib — tanpa itu tidak jelas materi mana yang diuji.
+    `week` memakai jadwal kampus pemanggil — bukan jadwal bawaan global, sebab
+    kalender akademik tiap kampus berbeda; `weeks` membuat rentang bebas. Salah
+    satunya wajib — tanpa itu tidak jelas materi mana yang diuji.
     """
     if weeks:
         try:
@@ -66,15 +68,15 @@ def _resolve_plan(
     if week is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Isi 'week' (jadwal bawaan) atau 'weeks' (rentang bebas)",
+            detail="Isi 'week' (jadwal kampus) atau 'weeks' (rentang bebas)",
         )
-    plan = evaluation_mod.plan_for_week(week)
+    plan = evaluation_mod.plan_for_week(week, schedule)
     if plan is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
                 f"Minggu {week} bukan minggu evaluasi. "
-                f"Minggu evaluasi: {list(evaluation_mod.EVALUATION_WEEKS)}"
+                f"Minggu evaluasi: {list(evaluation_mod.evaluation_weeks(schedule))}"
             ),
         )
     return plan
@@ -84,13 +86,16 @@ def _resolve_plan(
 async def get_schedule(
     tenant: TenantContext = Depends(tenant_chat),
 ) -> EvaluationScheduleResponse:
-    """Jadwal evaluasi satu semester beserta cakupan minggunya."""
+    """Jadwal evaluasi satu semester beserta cakupan minggunya.
+
+    Yang dikembalikan adalah kalender KAMPUS PEMANGGIL; jadwal bawaan hanya
+    dipakai bila kampus itu belum menentukan kalendernya sendiri.
+    """
+    rencana = evaluation_mod.plans_for(tenant.evaluation_schedule)
+    minggu = sorted(rencana)
     return EvaluationScheduleResponse(
-        evaluation_weeks=list(evaluation_mod.EVALUATION_WEEKS),
-        plans=[
-            _plan_info(evaluation_mod.DEFAULT_SCHEDULE[w])
-            for w in evaluation_mod.EVALUATION_WEEKS
-        ],
+        evaluation_weeks=minggu,
+        plans=[_plan_info(rencana[w]) for w in minggu],
     )
 
 
@@ -110,7 +115,9 @@ async def get_questions(
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
     tenant.require_course(body.course_id)
 
-    plan = _resolve_plan(body.week, body.weeks, body.kind, body.counts)
+    plan = _resolve_plan(
+        body.week, body.weeks, body.kind, body.counts, tenant.evaluation_schedule,
+    )
     items = await pipeline.evaluation(
         body.course_id, plan, tenant_id=tenant.tenant_id, model=body.model,
     )
@@ -154,7 +161,9 @@ async def submit(
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
     tenant.require_course(body.course_id)
 
-    plan = _resolve_plan(body.week, body.weeks, body.kind, body.counts)
+    plan = _resolve_plan(
+        body.week, body.weeks, body.kind, body.counts, tenant.evaluation_schedule,
+    )
     items = await pipeline.evaluation(
         body.course_id, plan, tenant_id=tenant.tenant_id, model=body.model,
     )

@@ -50,6 +50,185 @@ class TestJadwal:
         assert ev.custom_plan([5]).range_text == "minggu 5"
 
 
+# Kalender kampus 14 minggu dengan ETS di minggu 7 — sengaja berbeda dari
+# bawaan 4/8/12/16, karena justru kampus seperti inilah yang dulu mendapat
+# jadwal salah tanpa satu pun pesan galat.
+KALENDER_14 = [
+    {"week": 4, "kind": "kuis", "covers": [1, 4]},
+    {"week": 7, "kind": "ets", "covers": [1, 7]},
+    {"week": 11, "kind": "kuis", "covers": [8, 11]},
+    {"week": 14, "kind": "eas", "covers": [8, 14]},
+]
+
+
+class TestJadwalPerKampus:
+    """Kalender akademik milik tiap kampus, bukan konstanta di dalam kode."""
+
+    def test_jadwal_tenant_dipakai_bukan_bawaan(self) -> None:
+        j = ev.EvaluationSchedule.from_json(KALENDER_14)
+        assert ev.evaluation_weeks(j) == (4, 7, 11, 14)
+        ets = ev.plan_for_week(7, j)
+        assert ets.kind == "ets"
+        assert ets.weeks_covered == tuple(range(1, 8))
+        # Minggu 8 adalah ETS pada jadwal bawaan; di kampus ini minggu biasa.
+        assert ev.plan_for_week(8, j) is None
+        assert not ev.is_evaluation_week(8, j)
+
+    def test_tanpa_jadwal_tetap_bawaan(self) -> None:
+        assert ev.evaluation_weeks(None) == ev.EVALUATION_WEEKS
+        assert ev.plan_for_week(8, None).kind == "ets"
+        assert ev.is_evaluation_week(8, None)
+
+    def test_jadwal_satu_kampus_tidak_mengubah_bawaan(self) -> None:
+        # Bawaan dipakai bersama seluruh tenant; kalau ia ikut berubah, satu
+        # kampus dapat menggeser jadwal kampus lain.
+        ev.EvaluationSchedule.from_json(KALENDER_14)
+        assert ev.EVALUATION_WEEKS == (4, 8, 12, 16)
+        assert ev.plan_for_week(12).kind == "kuis"
+
+    def test_komposisi_khusus_ikut_tersimpan(self) -> None:
+        j = ev.EvaluationSchedule.from_json(
+            [{"week": 6, "kind": "kuis", "covers": [1, 6], "counts": {"esai": 2}}]
+        )
+        assert ev.plan_for_week(6, j).blueprint.counts == {"esai": 2}
+
+    def test_bolak_balik_json_utuh(self) -> None:
+        j = ev.EvaluationSchedule.from_json(KALENDER_14)
+        assert j.as_json() == KALENDER_14
+        assert ev.EvaluationSchedule.from_json(j.as_json()).plans == j.plans
+
+    @pytest.mark.parametrize(
+        ("cacat", "pesan"),
+        [
+            ([], "tidak kosong"),
+            ("4:kuis", "tidak kosong"),
+            ([{"week": 0, "covers": [1, 1]}], "antara 1"),
+            ([{"week": 99, "covers": [1, 9]}], "antara 1"),
+            ([{"week": True, "covers": [1, 1]}], "bilangan bulat"),
+            ([{"week": "4", "covers": [1, 4]}], "bilangan bulat"),
+            ([{"week": 4, "kind": "uas", "covers": [1, 4]}], "tidak dikenal"),
+            ([{"week": 4, "covers": [4, 1]}], "terbalik"),
+            ([{"week": 4, "covers": [1, 9]}], "tidak dapat mencakup"),
+            ([{"week": 4, "covers": [1]}], "berbentuk"),
+            ([{"week": 4}, {"week": 4}], "lebih dari sekali"),
+            ([{"week": 4, "counts": {"menggambar": 2}}], "tidak dikenal"),
+            ([{"week": 4, "counts": {"esai": "dua"}}], "jumlah"),
+        ],
+    )
+    def test_jadwal_cacat_ditolak_saat_dimuat(self, cacat: object, pesan: str) -> None:
+        # Ditolak saat DIMUAT, bukan saat dipakai: jadwal cacat yang lolos ke
+        # runtime baru ketahuan setelah mahasiswa mengerjakan evaluasi keliru.
+        with pytest.raises(ValueError, match=pesan):
+            ev.EvaluationSchedule.from_json(cacat)
+
+
+class TestJadwalDiPendaftaranTenant:
+    """Jadwal ikut rekaman tenant dan terbawa oleh kunci API-nya."""
+
+    def test_tersimpan_dan_terbaca_kembali(self) -> None:
+        from src.storage import tenant_store
+
+        tenant_store.create_tenant("kampus-c", "Kampus C")
+        assert tenant_store.set_schedule(
+            "kampus-c", ev.EvaluationSchedule.from_json(KALENDER_14)
+        )
+        lagi = tenant_store.get("kampus-c")
+        assert lagi.evaluation_schedule.weeks == (4, 7, 11, 14)
+
+    def test_kunci_membawa_jadwal_kampusnya(self) -> None:
+        from src.storage import tenant_store
+
+        tenant_store.create_tenant("kampus-c", "Kampus C")
+        tenant_store.set_schedule(
+            "kampus-c", ev.EvaluationSchedule.from_json(KALENDER_14)
+        )
+        kunci = tenant_store.issue_key("kampus-c")
+        ctx = tenant_store.authenticate(kunci.raw)
+        assert ctx.evaluation_schedule.weeks == (4, 7, 11, 14)
+
+    def test_tanpa_jadwal_konteksnya_none(self) -> None:
+        from src.storage import tenant_store
+
+        tenant_store.create_tenant("kampus-d", "Kampus D")
+        kunci = tenant_store.issue_key("kampus-d")
+        ctx = tenant_store.authenticate(kunci.raw)
+        assert ctx.evaluation_schedule is None
+        assert ev.evaluation_weeks(ctx.evaluation_schedule) == ev.EVALUATION_WEEKS
+
+    def test_reset_mengembalikan_ke_bawaan(self) -> None:
+        from src.storage import tenant_store
+
+        tenant_store.create_tenant("kampus-c", "Kampus C")
+        tenant_store.set_schedule(
+            "kampus-c", ev.EvaluationSchedule.from_json(KALENDER_14)
+        )
+        assert tenant_store.set_schedule("kampus-c", None)
+        assert tenant_store.get("kampus-c").evaluation_schedule is None
+
+    def test_berkas_dengan_jadwal_cacat_ditolak_saat_dimuat(self) -> None:
+        from src.storage import tenant_store
+
+        with pytest.raises(ValueError):
+            tenant_store.Tenant.from_dict({
+                "tenant_id": "kampus-c",
+                # Evaluasi minggu 3 mustahil menguji sampai minggu 9.
+                "evaluation_schedule": [{"week": 3, "covers": [1, 9]}],
+            })
+
+
+class TestRuteJadwalMilikPemanggil:
+    """Rute evaluasi memakai kalender tenant yang memanggil, bukan bawaan global."""
+
+    @pytest.fixture
+    def klien(self, disable_rate_limit: None):
+        from unittest.mock import AsyncMock
+
+        from fastapi.testclient import TestClient
+
+        from src.api import auth
+        from src.api.dependencies import get_pipeline
+        from src.api.main import app
+
+        def buat(tenant):
+            app.dependency_overrides[auth.tenant_chat] = lambda: tenant
+            app.dependency_overrides[get_pipeline] = lambda: AsyncMock()
+            return TestClient(app)
+
+        yield buat
+        app.dependency_overrides.pop(auth.tenant_chat, None)
+        app.dependency_overrides.pop(get_pipeline, None)
+
+    @staticmethod
+    def _tenant(tenant_id: str, jadwal: object | None):
+        from src.tenancy import ALL_SCOPES, TenantContext
+
+        return TenantContext(
+            tenant_id=tenant_id, scopes=frozenset(ALL_SCOPES),
+            evaluation_schedule=jadwal,
+        )
+
+    def test_jadwal_yang_disajikan_milik_kampus_pemanggil(self, klien) -> None:
+        t = self._tenant("kampus-c", ev.EvaluationSchedule.from_json(KALENDER_14))
+        badan = klien(t).get("/evaluation/schedule").json()
+        assert badan["evaluation_weeks"] == [4, 7, 11, 14]
+        assert badan["plans"][1]["kind"] == "ets"
+        assert badan["plans"][1]["range_text"] == "minggu 1-7"
+
+    def test_kampus_tanpa_jadwal_mendapat_bawaan(self, klien) -> None:
+        badan = klien(self._tenant("kampus-d", None)).get("/evaluation/schedule").json()
+        assert badan["evaluation_weeks"] == [4, 8, 12, 16]
+
+    def test_minggu_di_luar_kalender_kampus_ditolak(self, klien) -> None:
+        # Minggu 8 adalah ETS pada jadwal bawaan. Bagi kampus 14 minggu ia
+        # minggu biasa, dan penolakannya harus menyebut kalender kampus itu.
+        t = self._tenant("kampus-c", ev.EvaluationSchedule.from_json(KALENDER_14))
+        r = klien(t).post(
+            "/evaluation/questions", json={"course_id": "sbd", "week": 8},
+        )
+        assert r.status_code == 400
+        assert "[4, 7, 11, 14]" in r.json()["detail"]
+
+
 class TestKomposisiSoal:
     def test_jenis_asing_ditolak(self) -> None:
         with pytest.raises(ValueError, match="tidak dikenal"):

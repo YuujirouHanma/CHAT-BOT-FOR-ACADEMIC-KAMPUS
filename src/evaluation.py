@@ -20,6 +20,13 @@ maka yang terukur hanyalah gaya mana yang paling membantu mengenali jawaban —
 bukan gaya mana yang paling membantu memahami. Karena itu isian singkat, esai,
 dan soal koding disediakan sejak awal, bukan ditambahkan belakangan.
 
+Jadwal adalah milik tiap kampus
+-------------------------------
+`DEFAULT_SCHEDULE` hanyalah BAWAAN. Kalender akademik berbeda antar kampus, jadi
+setiap fungsi jadwal di sini menerima `EvaluationSchedule` milik tenant sebagai
+argumen alih-alih membaca satu jadwal global — tenant yang tidak menentukan
+sendiri tetap mendapat bawaan.
+
 Penilaian
 ---------
 - `pilihan_ganda`, `benar_salah` → dinilai mesin, pasti dan gratis.
@@ -144,14 +151,142 @@ DEFAULT_SCHEDULE: Final[dict[int, EvaluationPlan]] = {
 
 EVALUATION_WEEKS: Final[tuple[int, ...]] = tuple(sorted(DEFAULT_SCHEDULE))
 
+# Batas atas minggu yang masih masuk akal untuk satu semester. Disamakan dengan
+# batas `week` di skema API, supaya jadwal yang tersimpan tidak pernah memuat
+# minggu yang justru ditolak saat klien memintanya.
+MAX_WEEK: Final[int] = 52
 
-def is_evaluation_week(week: int | None) -> bool:
-    return week in DEFAULT_SCHEDULE
+
+def _week_number(nilai: Any, medan: str) -> int:
+    """Baca satu nomor minggu dari JSON, menolak yang di luar nalar.
+
+    `bool` ditolak terpisah karena di Python ia subkelas `int`, sehingga tanpa
+    pemeriksaan ini `true` akan lolos sebagai minggu 1.
+    """
+    if isinstance(nilai, bool) or not isinstance(nilai, int):
+        raise ValueError(f"{medan} harus bilangan bulat; diterima {nilai!r}")
+    if not 1 <= nilai <= MAX_WEEK:
+        raise ValueError(f"{medan} harus antara 1 dan {MAX_WEEK}; diterima {nilai}")
+    return nilai
 
 
-def plan_for_week(week: int) -> EvaluationPlan | None:
+def _plan_from_json(entri: Any) -> EvaluationPlan:
+    """Satu baris jadwal: minggu, jenis, rentang yang diuji, komposisi soal."""
+    if not isinstance(entri, dict):
+        raise ValueError(f"Setiap entri jadwal harus berupa objek; diterima {entri!r}")
+
+    week = _week_number(entri.get("week"), "'week'")
+    kind = entri.get("kind", "kuis")
+    if kind not in KIND_LABELS:
+        raise ValueError(f"Jenis evaluasi tidak dikenal: {kind!r}")
+
+    covers = entri.get("covers") or [1, week]
+    if not isinstance(covers, list | tuple) or len(covers) != 2:
+        raise ValueError("'covers' harus berbentuk [minggu_awal, minggu_akhir]")
+    awal = _week_number(covers[0], "minggu awal 'covers'")
+    akhir = _week_number(covers[1], "minggu akhir 'covers'")
+    if awal > akhir:
+        raise ValueError(f"Rentang 'covers' terbalik: minggu {awal}-{akhir}")
+    if akhir > week:
+        # Evaluasi tidak mungkin menguji minggu yang belum berlangsung; kalau
+        # dibiarkan, mahasiswa mendapat soal dari materi yang belum diajarkan.
+        raise ValueError(
+            f"Evaluasi minggu {week} tidak dapat mencakup sampai minggu {akhir}"
+        )
+
+    counts = entri.get("counts")
+    if counts is None:
+        bp = DEFAULT_BLUEPRINTS[kind]
+    else:
+        if not isinstance(counts, dict) or any(
+            isinstance(n, bool) or not isinstance(n, int) for n in counts.values()
+        ):
+            raise ValueError("'counts' harus berupa objek {jenis_soal: jumlah}")
+        bp = Blueprint(dict(counts))
+    bp.validate()
+
+    return EvaluationPlan(
+        week=week, kind=kind,
+        weeks_covered=tuple(range(awal, akhir + 1)),
+        blueprint=bp,
+    )
+
+
+@dataclass(frozen=True)
+class EvaluationSchedule:
+    """Kalender evaluasi milik SATU kampus.
+
+    Kalender akademik adalah milik tiap kampus: ada yang bersemester 14 minggu,
+    ada yang menaruh ETS di minggu 7. Selama jadwalnya tertanam di kode, kampus
+    seperti itu mendapat rencana evaluasi yang salah TANPA pesan apa pun —
+    sebagai data per tenant, ia menjadi setelan yang dapat diperiksa dan diubah.
+    """
+    plans: dict[int, EvaluationPlan]
+
+    @property
+    def weeks(self) -> tuple[int, ...]:
+        return tuple(sorted(self.plans))
+
+    @classmethod
+    def from_json(cls, raw: Any) -> EvaluationSchedule:
+        """Muat jadwal dari bentuk JSON; galat bila tidak sah.
+
+        Sengaja divalidasi saat DIMUAT, bukan saat dipakai: jadwal cacat yang
+        lolos ke runtime baru ketahuan setelah mahasiswa mengerjakan evaluasi
+        dengan rentang minggu yang keliru.
+        """
+        if not isinstance(raw, list) or not raw:
+            raise ValueError(
+                "Jadwal evaluasi harus berupa daftar tidak kosong; hapus medannya "
+                "bila kampus ini memakai jadwal bawaan"
+            )
+        plans: dict[int, EvaluationPlan] = {}
+        for entri in raw:
+            plan = _plan_from_json(entri)
+            if plan.week in plans:
+                raise ValueError(f"Minggu {plan.week} muncul lebih dari sekali")
+            plans[plan.week] = plan
+        return cls(plans)
+
+    def as_json(self) -> list[dict[str, Any]]:
+        """Bentuk yang ditulis ke berkas tenant."""
+        hasil: list[dict[str, Any]] = []
+        for w in self.weeks:
+            p = self.plans[w]
+            entri: dict[str, Any] = {
+                "week": p.week,
+                "kind": p.kind,
+                "covers": [p.weeks_covered[0], p.weeks_covered[-1]],
+            }
+            # Komposisi hanya ditulis bila berbeda dari bawaan jenisnya, supaya
+            # berkas tenant menyorot apa yang memang sengaja dibedakan.
+            if p.blueprint.counts != DEFAULT_BLUEPRINTS[p.kind].counts:
+                entri["counts"] = dict(p.blueprint.counts)
+            hasil.append(entri)
+        return hasil
+
+
+def plans_for(schedule: EvaluationSchedule | None) -> dict[int, EvaluationPlan]:
+    """Jadwal milik tenant bila ada, jadwal bawaan bila tenant tidak menentukan."""
+    return DEFAULT_SCHEDULE if schedule is None else schedule.plans
+
+
+def is_evaluation_week(
+    week: int | None, schedule: EvaluationSchedule | None = None,
+) -> bool:
+    return week in plans_for(schedule)
+
+
+def plan_for_week(
+    week: int, schedule: EvaluationSchedule | None = None,
+) -> EvaluationPlan | None:
     """Rencana evaluasi untuk sebuah minggu; None bila minggu biasa."""
-    return DEFAULT_SCHEDULE.get(week)
+    return plans_for(schedule).get(week)
+
+
+def evaluation_weeks(schedule: EvaluationSchedule | None = None) -> tuple[int, ...]:
+    """Minggu evaluasi milik tenant; `EVALUATION_WEEKS` adalah bawaannya."""
+    return tuple(sorted(plans_for(schedule)))
 
 
 def custom_plan(

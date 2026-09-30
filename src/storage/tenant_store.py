@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from src.config import PROJECT_ROOT
+from src.evaluation import EvaluationSchedule
 from src.security import keys as key_utils
 from src.tenancy import (
     ALL_SCOPES,
@@ -96,6 +97,10 @@ class Tenant:
     quota: TenantQuota = field(default_factory=TenantQuota)
     api_keys: list[ApiKeyRecord] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
+    # Kalender evaluasi kampus ini; None berarti memakai jadwal bawaan. Disimpan
+    # per tenant karena kalender akademik memang berbeda-beda: ada semester 14
+    # minggu, ada yang ETS-nya minggu 7.
+    evaluation_schedule: EvaluationSchedule | None = None
 
     @property
     def is_active(self) -> bool:
@@ -109,11 +114,15 @@ class Tenant:
             "quota": self.quota.as_dict(),
             "api_keys": [k.as_dict() for k in self.api_keys],
             "created_at": self.created_at,
+            "evaluation_schedule": (
+                self.evaluation_schedule.as_json() if self.evaluation_schedule else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> Tenant:
         kuota = d.get("quota") or {}
+        jadwal = d.get("evaluation_schedule")
         return cls(
             tenant_id=d["tenant_id"],
             name=d.get("name", ""),
@@ -126,6 +135,12 @@ class Tenant:
             ),
             api_keys=[ApiKeyRecord.from_dict(k) for k in (d.get("api_keys") or [])],
             created_at=d.get("created_at") or _now(),
+            # Jadwal cacat digagalkan DI SINI, saat berkas dibaca. Kalau
+            # ditunda sampai dipakai, kampus itu diam-diam dilayani dengan
+            # rentang minggu yang salah sepanjang semester.
+            evaluation_schedule=(
+                EvaluationSchedule.from_json(jadwal) if jadwal is not None else None
+            ),
         )
 
 
@@ -266,6 +281,7 @@ def authenticate(raw_key: str | None) -> TenantContext | None:
             frozenset(record.allowed_courses) if record.allowed_courses else None
         ),
         key_id=record.key_id,
+        evaluation_schedule=tenant.evaluation_schedule,
     )
 
 
@@ -334,6 +350,25 @@ def revoke_key(tenant_id: str, key_id: str) -> bool:
             logger.info("Kunci dicabut: tenant={} key_id={}", tenant_id, key_id)
             return True
     return False
+
+
+def set_schedule(tenant_id: str, schedule: EvaluationSchedule | None) -> bool:
+    """Tetapkan kalender evaluasi tenant; `None` mengembalikannya ke bawaan.
+
+    Menerima objek yang SUDAH tervalidasi, bukan JSON mentah: validasinya satu
+    pintu di `EvaluationSchedule.from_json`, sehingga jalur CLI dan jalur muat
+    berkas tidak mungkin berbeda aturan.
+    """
+    tenant = get(tenant_id)
+    if tenant is None:
+        return False
+    tenant.evaluation_schedule = schedule
+    save(tenant)
+    logger.info(
+        "Jadwal evaluasi tenant {} → {}",
+        tenant_id, list(schedule.weeks) if schedule else "bawaan",
+    )
+    return True
 
 
 def set_status(tenant_id: str, status: str) -> bool:

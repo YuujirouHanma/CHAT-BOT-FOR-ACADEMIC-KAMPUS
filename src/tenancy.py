@@ -29,7 +29,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    # Hanya untuk anotasi: modul ini adalah fondasi yang diimpor hampir semua
+    # lapisan, jadi ia sengaja tidak menarik modul domain ikut ke runtime.
+    from src.evaluation import EvaluationSchedule
 
 # tenant_id ikut menjadi nama direktori, jadi polanya sengaja ketat: huruf kecil,
 # angka, strip, garis bawah. Tidak ada titik dan garis miring, sehingga mustahil
@@ -146,6 +151,10 @@ class TenantContext:
     # Dipakai di log audit untuk menelusuri kunci mana yang dipakai, tanpa
     # pernah menuliskan kuncinya sendiri.
     key_id: str = ""
+    # Kalender evaluasi kampus ini. None = memakai jadwal bawaan. Ikut dibawa di
+    # sini, bukan dibaca ulang dari pendaftaran tenant di setiap rute, supaya
+    # jadwal yang dipakai selalu milik pemilik kunci yang sedang memanggil.
+    evaluation_schedule: EvaluationSchedule | None = None
 
     def __post_init__(self) -> None:
         require_tenant_id(self.tenant_id, operation="TenantContext")
