@@ -38,33 +38,21 @@ def parse_content_id(content_id: str | None) -> tuple[str | None, int | None]:
     return (course or None), int(match.group("week"))
 
 
-# Nama tampilan untuk mata kuliah yang sudah dikenal. Penebakan dari slug
-# menghasilkan "Dasprog Rka" — benar secara mekanis, tetapi bukan nama yang
-# dikenali mahasiswa, dan nama itulah yang muncul sebagai tombol pilihan.
-# Kelas paralel (RKA/IF) sengaja dipisah menjadi dua mata kuliah: materinya
-# berbeda, dan mencampurnya membuat mahasiswa satu kelas melihat bahan kelas lain.
-KNOWN_COURSE_NAMES: dict[str, str] = {
-    "dasprog-rka": "Dasar Pemrograman (RKA)",
-    "dasprog-if": "Dasar Pemrograman (IF)",
-    "sbd": "Sistem Basis Data",
-    "kka": "Konsep Kecerdasan Artifisial",
-    "rsbp": "Rekayasa Sistem Berbasis Pengetahuan",
-    "strukdat": "Struktur Data",
-}
-
-
 def humanize_course(course_id: str | None) -> str | None:
     """Nama tampilan hasil TEBAKAN MEKANIS dari slug.
 
     'dasar-pemrograman' → 'Dasar Pemrograman'; slug pendek beralfabet
     (mis. 'sbd') dianggap akronim dan dikapitalkan.
 
-    Sengaja tidak melihat `KNOWN_COURSE_NAMES`: `QdrantStore.list_courses`
+    Tebakan ini netral terhadap kampus mana pun karena hanya mengolah slug yang
+    dikirim pengunggah sendiri — ia tidak pernah memasangkan arti milik satu
+    kampus ke kode mata kuliah kampus lain. Nama yang benar-benar dikenali
+    mahasiswa datang dari data tenant: parameter `course_name` saat unggah,
+    yang disimpan `QdrantStore` di payload.
+
+    Hasilnya harus tetap murni mekanis karena `QdrantStore.list_courses`
     memakai fungsi ini sebagai pembanding untuk mengenali "nama ini cuma
     tebakan, jadi nama eksplisit dari pengunggah boleh menggantikannya".
-    Kalau di sini ikut mengembalikan nama kurasi, perbandingan itu tidak
-    pernah cocok dan nama eksplisit tidak pernah menang. Untuk menampilkan
-    nama kepada pengguna, pakai `display_name()`.
     """
     if not course_id:
         return None
@@ -75,14 +63,22 @@ def humanize_course(course_id: str | None) -> str | None:
 
 
 def display_name(course_id: str | None) -> str | None:
-    """Nama yang ditampilkan kepada mahasiswa.
+    """Nama yang ditampilkan kepada mahasiswa — pembungkus tipis `humanize_course`.
 
-    Nama kurasi lebih dulu, lalu tebakan mekanis. Dipakai hanya di titik
-    penyajian — bukan sebagai pembanding di dalam logika katalog.
+    Dulu fungsi ini terpisah karena ada kamus nama kurasi di kode yang
+    didahulukan sebelum tebakan mekanis. Kamus itu dibuang: isinya nama mata
+    kuliah milik SATU kampus, padahal satu pemasangan melayani banyak kampus.
+    Kampus lain yang kebetulan memakai slug sama akan melihat nama mata kuliah
+    kampus lain pada tombol pilihannya — dan nama itu bukan sekadar tampilan:
+    ia ikut ke prompt LLM lalu muncul di jawaban chatbot. Karena itu nama
+    kurasi di kode tidak boleh kembali; satu-satunya sumber nama khusus adalah
+    data tenant lewat `course_name` saat unggah.
+
+    Namanya dipertahankan agar pemanggil (mis. `src/pipeline.py`) tetap menandai
+    "ini titik penyajian", terpisah dari pemakaian `humanize_course` sebagai
+    pembanding di dalam logika katalog.
     """
-    if not course_id:
-        return None
-    return KNOWN_COURSE_NAMES.get(course_id.strip().lower()) or humanize_course(course_id)
+    return humanize_course(course_id)
 
 
 def resolve_course_week(
