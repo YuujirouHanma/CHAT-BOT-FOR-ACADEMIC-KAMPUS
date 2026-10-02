@@ -24,7 +24,7 @@ from src.tenancy import require_tenant_id
 from src.utils.logger import logger
 
 
-def _dedupe_identical_text(candidates: list[dict]) -> list[dict]:
+def _buang_teks_kembar(candidates: list[dict]) -> list[dict]:
     """Buang kandidat yang teksnya identik dengan kandidat berperingkat lebih tinggi.
 
     Materi yang sama sah terindeks di lebih dari satu cakupan — deck yang dipakai
@@ -148,7 +148,7 @@ class HybridRetriever:
                 mode, len(candidates),
             )
 
-        unik = _dedupe_identical_text(candidates)
+        unik = _buang_teks_kembar(candidates)
         if len(unik) < len(candidates):
             logger.info(
                 "Membuang {} kandidat bertek identik sebelum rerank ({} → {})",

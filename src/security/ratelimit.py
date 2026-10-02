@@ -1,151 +1,165 @@
-"""Pembatasan laju berlapis dan pencegahan penebakan kunci.
+"""Kuota permintaan berlapis dan pencegahan penebakan kunci.
 
 Tiga lapis, dievaluasi berurutan dari yang paling murah:
 
-1. **Per alamat IP** — menahan penyalahgunaan sebelum kredensial diperiksa,
-   termasuk lalu lintas yang tidak membawa kunci sama sekali.
-2. **Per kunci API (`key_id`)** — satu integrasi yang salah membuat perulangan
-   tidak menghabiskan jatah seluruh tenant.
-3. **Per tenant** — batas komersial sesungguhnya; inilah yang menjaga tagihan
-   LLM tetap terkendali dan menjadi dasar penjualan berjenjang.
+1. **Per alamat IP** (`check_ip`) — menahan penyalahgunaan SEBELUM kredensial
+   diperiksa, termasuk lalu lintas yang tidak membawa kunci sama sekali.
+2. **Perlambatan auth** (`AuthThrottle`) — menahan penebakan kunci sistematis.
+3. **Per kampus** (`check`) — kuota komersial: setiap pertanyaan memanggil LLM
+   berbayar, jadi tanpa batas, satu kampus yang ramai — atau satu skrip yang
+   salah membuat perulangan — menghabiskan kapasitas dan tagihan milik semua.
 
-Algoritma: *token bucket*. Dipilih daripada jendela tetap karena membolehkan
-lonjakan wajar (mahasiswa membuka riwayat lalu langsung bertanya) tanpa
-melonggarkan laju rata-rata, dan tidak punya masalah "reset serentak di detik
-ke-0" seperti jendela tetap.
+Algoritma jendela tetap per menit dan per hari. Dipilih karena di Redis cukup
+INCR + EXPIRE yang atomik, tanpa skrip Lua. Lonjakan di batas dua jendela
+(maksimal dua kali lipat sesaat) dapat diterima untuk tujuan ini.
 
-BATASAN PENTING — penyimpanan di memori proses. Dengan lebih dari satu worker
-uvicorn atau lebih dari satu replika, tiap proses punya hitungannya sendiri,
-sehingga batas efektif menjadi berlipat jumlah proses. Untuk produksi, ganti
-`_MemoryBackend` dengan backend Redis (skrip Lua `INCR`+`EXPIRE` atau
-`CL.THROTTLE`); antarmuka `_Backend` sengaja dibuat sempit agar penggantinya
-tidak menyentuh pemanggil. Lihat docs/SECURITY.md.
+Backend penyimpan mengikuti `SESSION_BACKEND`, sama seperti sesi dan job unggah:
+backend produksi berjalan dengan beberapa pekerja uvicorn, dan hitungan di memori
+tiap pekerja membuat batas efektif berlipat jumlah pekerja. Memori hanya benar
+untuk satu proses (pengembangan & uji).
+
+Bila Redis gagal, permintaan DILOLOSKAN (fail open) dengan peringatan di log:
+kuota adalah kendali kewajaran pemakaian, bukan pengaman akses — gangguan Redis
+sesaat tidak boleh menutup layanan untuk semua kampus.
+
+`AuthThrottle` sengaja TIDAK ikut ke Redis. Ia hanya perlu memperlambat, dan
+perlambatan per proses sudah cukup menghabisi laju penebakan; menaruhnya di Redis
+berarti satu permintaan tambahan ke jaringan pada jalur autentikasi setiap
+permintaan, termasuk yang sah.
 """
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Protocol
 
-# Batas jumlah ember yang disimpan. Tanpa ini, penyerang yang mengganti IP atau
-# key_id tiap permintaan akan menumbuhkan memori proses tanpa henti — pembatas
-# laju itu sendiri berubah menjadi jalur serangan kehabisan memori.
-_MAX_BUCKETS = 50_000
-_EVICT_TO = 40_000
+from src.config import settings
+from src.utils.logger import logger
 
-
-@dataclass
-class _Bucket:
-    tokens: float
-    updated: float
-
-
-class _Backend(Protocol):
-    def take(self, key: str, capacity: int, refill_per_sec: float, cost: float) -> float:
-        """Ambil `cost` token. Mengembalikan 0.0 bila boleh, atau detik tunggu."""
-        ...
-
-
-class _MemoryBackend:
-    """Backend token bucket di memori proses (cocok untuk satu proses/dev)."""
-
-    def __init__(self) -> None:
-        self._buckets: dict[str, _Bucket] = {}
-
-    def _evict_if_needed(self, now: float) -> None:
-        if len(self._buckets) <= _MAX_BUCKETS:
-            return
-        # Buang yang paling lama tidak dipakai. Ember yang sudah penuh kembali
-        # tidak membawa informasi apa pun, jadi membuangnya tidak melonggarkan
-        # batas siapa pun yang sedang aktif.
-        urut = sorted(self._buckets.items(), key=lambda kv: kv[1].updated)
-        for key, _ in urut[: len(self._buckets) - _EVICT_TO]:
-            self._buckets.pop(key, None)
-
-    def take(self, key: str, capacity: int, refill_per_sec: float, cost: float = 1.0) -> float:
-        now = time.monotonic()
-        b = self._buckets.get(key)
-        if b is None:
-            self._evict_if_needed(now)
-            b = _Bucket(tokens=float(capacity), updated=now)
-            self._buckets[key] = b
-        else:
-            b.tokens = min(float(capacity), b.tokens + (now - b.updated) * refill_per_sec)
-            b.updated = now
-
-        if b.tokens >= cost:
-            b.tokens -= cost
-            return 0.0
-        kurang = cost - b.tokens
-        return kurang / refill_per_sec if refill_per_sec > 0 else 3600.0
-
-    def reset(self, key: str | None = None) -> None:
-        if key is None:
-            self._buckets.clear()
-        else:
-            self._buckets.pop(key, None)
+_PREFIX = "ragacademic:rl:"
+_MINUTE_TTL = 70          # sedikit lebih lama dari jendelanya, lalu hilang sendiri
+_DAY_TTL = 90_000         # 25 jam
+_MAX_KEYS = 50_000        # batas cache memori agar tidak tumbuh tanpa henti
 
 
 @dataclass(frozen=True)
 class Decision:
     allowed: bool
     retry_after: int = 0
-    scope: str = ""      # lapis mana yang menolak — dipakai log & header
-
-    @property
-    def reason(self) -> str:
-        return f"batas laju {self.scope}" if self.scope else "batas laju"
+    scope: str = ""
 
 
-@dataclass
-class RateLimiter:
-    """Pembatas laju berlapis."""
-    backend: _MemoryBackend = field(default_factory=_MemoryBackend)
+class _Backend(Protocol):
+    async def hit(self, key: str, ttl: int) -> int: ...
 
-    def check(
-        self,
-        *,
-        ip: str | None,
-        key_id: str | None,
-        tenant_id: str | None,
-        per_minute: int,
-        per_day: int,
-        ip_per_minute: int,
-        cost: float = 1.0,
+
+class MemoryBackend:
+    """Hitungan di memori proses. Hanya benar bila backend berjalan satu proses."""
+
+    def __init__(self) -> None:
+        self._counts: dict[str, tuple[int, float]] = {}
+
+    def reset(self) -> None:
+        """Kosongkan seluruh hitungan.
+
+        Dipakai di antara uji: tanpa ini satu uji yang menghabiskan jatah akan
+        menjatuhkan uji berikutnya, dan kegagalannya tampak acak karena
+        bergantung pada urutan jalannya.
+        """
+        self._counts.clear()
+
+    async def hit(self, key: str, ttl: int) -> int:
+        now = time.monotonic()
+        count, expires = self._counts.get(key, (0, now + ttl))
+        if expires <= now:
+            count, expires = 0, now + ttl
+        count += 1
+        self._counts[key] = (count, expires)
+        if len(self._counts) > _MAX_KEYS:
+            self._counts = {k: v for k, v in self._counts.items() if v[1] > now}
+        return count
+
+
+class RedisBackend:
+    """Hitungan bersama antar pekerja, kedaluwarsa ditangani Redis."""
+
+    def __init__(self, url: str) -> None:
+        from redis.asyncio import Redis
+
+        self._redis = Redis.from_url(url, decode_responses=True)
+
+    async def hit(self, key: str, ttl: int) -> int:
+        pipe = self._redis.pipeline(transaction=True)
+        pipe.incr(key)
+        pipe.expire(key, ttl)
+        count, _ = await pipe.execute()
+        return int(count)
+
+
+class TenantRateLimiter:
+    def __init__(self, backend: _Backend) -> None:
+        self._backend = backend
+
+    def reset(self) -> None:
+        """Kosongkan hitungan backend bila ia mendukungnya.
+
+        Backend Redis sengaja tidak menyediakannya: mengosongkan hitungan di
+        Redis berarti menghapus jatah SELURUH kampus yang sedang berjalan, dan
+        itu bukan sesuatu yang boleh dilakukan dari dalam proses layanan.
+        """
+        bersihkan = getattr(self._backend, "reset", None)
+        if callable(bersihkan):
+            bersihkan()
+
+    async def check_ip(
+        self, ip: str | None, *, per_minute: int, now: float | None = None,
     ) -> Decision:
-        """Periksa ketiga lapis. Lapis pertama yang menolak menghentikan proses."""
-        if ip and ip_per_minute > 0:
-            tunggu = self.backend.take(
-                f"ip:{ip}", ip_per_minute, ip_per_minute / 60.0, cost,
-            )
-            if tunggu > 0:
-                return Decision(False, _ceil(tunggu), "ip")
+        """Lapis termurah: batasi per alamat asal, sebelum kunci diperiksa.
 
-        if key_id and per_minute > 0:
-            tunggu = self.backend.take(
-                f"key:{key_id}", per_minute, per_minute / 60.0, cost,
-            )
-            if tunggu > 0:
-                return Decision(False, _ceil(tunggu), "kunci")
-
-        if tenant_id:
-            if per_minute > 0:
-                tunggu = self.backend.take(
-                    f"tenant:m:{tenant_id}", per_minute, per_minute / 60.0, cost,
-                )
-                if tunggu > 0:
-                    return Decision(False, _ceil(tunggu), "tenant/menit")
-            if per_day > 0:
-                tunggu = self.backend.take(
-                    f"tenant:d:{tenant_id}", per_day, per_day / 86_400.0, cost,
-                )
-                if tunggu > 0:
-                    return Decision(False, _ceil(tunggu), "tenant/hari")
-
+        Ada karena lapis per kampus baru dapat dihitung SETELAH kunci diverifikasi
+        — jadi ia tidak menahan apa pun dari pemanggil yang tidak membawa kunci
+        sama sekali. Alamat asal dibaca lewat `src.api.auth.client_ip`, yang hanya
+        mempercayai `X-Forwarded-For` bila memang ada proxy tepercaya di depan.
+        """
+        if not ip or per_minute <= 0:
+            return Decision(True)
+        now = time.time() if now is None else now
+        try:
+            jendela = int(now // 60)
+            n = await self._backend.hit(f"{_PREFIX}ip:{ip}:{jendela}", _MINUTE_TTL)
+            if n > per_minute:
+                return Decision(False, max(1, 60 - int(now % 60)), "ip")
+        except Exception as exc:  # noqa: BLE001 - lihat catatan fail open di atas
+            logger.warning("Kuota IP tidak dapat diperiksa: {}", exc)
         return Decision(True)
 
-    def reset(self, key: str | None = None) -> None:
-        self.backend.reset(key)
+    async def check(
+        self,
+        tenant_id: str,
+        *,
+        per_minute: int,
+        per_day: int,
+        now: float | None = None,
+    ) -> Decision:
+        """Hitung satu permintaan kampus ini; tolak bila melewati kuotanya.
+
+        Kuota 0 berarti tanpa batas untuk jendela itu.
+        """
+        now = time.time() if now is None else now
+        try:
+            if per_minute > 0:
+                jendela = int(now // 60)
+                n = await self._backend.hit(f"{_PREFIX}{tenant_id}:m:{jendela}", _MINUTE_TTL)
+                if n > per_minute:
+                    return Decision(False, max(1, 60 - int(now % 60)), "minute")
+            if per_day > 0:
+                hari = int(now // 86_400)
+                n = await self._backend.hit(f"{_PREFIX}{tenant_id}:d:{hari}", _DAY_TTL)
+                if n > per_day:
+                    return Decision(False, max(1, 86_400 - int(now % 86_400)), "day")
+        except Exception as exc:  # noqa: BLE001 - lihat catatan fail open di atas
+            logger.warning("Kuota kampus {} tidak dapat diperiksa: {}", tenant_id, exc)
+        return Decision(True)
 
 
 class AuthThrottle:
@@ -183,8 +197,10 @@ class AuthThrottle:
     def record_failure(self, ident: str) -> None:
         now = time.monotonic()
         jumlah = self._current(ident, now)
-        if len(self._failures) > _MAX_BUCKETS:
-            self._failures.clear()   # backstop memori; lihat catatan di atas
+        if len(self._failures) > _MAX_KEYS:
+            # Backstop memori: penyerang yang mengganti alamat tiap percobaan
+            # tidak boleh menumbuhkan proses ini tanpa henti.
+            self._failures.clear()
         self._failures[ident] = (jumlah + 1, now)
 
     def record_success(self, ident: str) -> None:
@@ -208,5 +224,11 @@ def _ceil(x: float) -> int:
     return max(1, int(x) + (1 if x > int(x) else 0))
 
 
-limiter = RateLimiter()
+def _build_limiter() -> TenantRateLimiter:
+    if settings.session_backend == "redis":
+        return TenantRateLimiter(RedisBackend(settings.redis_url))
+    return TenantRateLimiter(MemoryBackend())
+
+
+limiter = _build_limiter()
 auth_throttle = AuthThrottle()

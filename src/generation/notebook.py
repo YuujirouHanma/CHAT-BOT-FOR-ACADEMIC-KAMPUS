@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import re
 
+from src.utils.berkas import safe_filename as _safe_filename
+
 # Blok kode berpagar beserta penanda bahasanya.
 _FENCE_RE = re.compile(r"```([A-Za-z0-9_+-]*)\n(.*?)```", re.DOTALL)
 
@@ -20,18 +22,42 @@ _FENCE_RE = re.compile(r"```([A-Za-z0-9_+-]*)\n(.*?)```", re.DOTALL)
 _RUNNABLE = {"python", "py", "python3", ""}
 
 
-def _markdown_cell(text: str) -> dict:
-    return {"cell_type": "markdown", "metadata": {}, "source": text.splitlines(True)}
+def sel_markdown(sumber, sel_id: str | None = None) -> dict:
+    """Satu sel markdown nbformat 4.
+
+    `sel_id` diisi untuk nbformat 4.5 ke atas, yang mewajibkan setiap sel punya
+    pengenal. Dibiarkan kosong pada pemanggil lama supaya keluarannya tidak
+    berubah bentuk.
+    """
+    sel = {"cell_type": "markdown", "metadata": {}, "source": sumber}
+    if sel_id is not None:
+        sel["id"] = sel_id
+    return sel
 
 
-def _code_cell(code: str) -> dict:
-    return {
+def sel_kode(sumber, sel_id: str | None = None) -> dict:
+    """Satu sel kode nbformat 4."""
+    sel = {
         "cell_type": "code",
         "execution_count": None,
         "metadata": {},
         "outputs": [],
-        "source": code.splitlines(True),
+        "source": sumber,
     }
+    if sel_id is not None:
+        sel["id"] = sel_id
+    return sel
+
+
+# Nama lama dipertahankan sebagai pembungkus: keduanya memecah teks menjadi
+# daftar baris lebih dulu, bentuk yang dipakai pemanggil di berkas ini.
+def _markdown_cell(text: str) -> dict:
+    return sel_markdown(text.splitlines(True))
+
+
+def _code_cell(code: str) -> dict:
+    return sel_kode(code.splitlines(True))
+
 
 
 def has_code(answer: str) -> bool:
@@ -88,7 +114,9 @@ def build_notebook(answer: str, title: str = "Catatan Belajar") -> str | None:
 
 
 def safe_filename(base: str) -> str:
-    """Nama berkas notebook yang aman di semua sistem berkas."""
-    bersih = re.sub(r"[^\w\s-]", "", base or "catatan", flags=re.UNICODE).strip()
-    bersih = re.sub(r"[\s_]+", "-", bersih).lower() or "catatan"
-    return f"{bersih[:60]}.ipynb"
+    """Nama berkas notebook yang aman di semua sistem berkas.
+
+    Pembungkus tipis atas `src.utils.berkas.safe_filename`, dipertahankan
+    agar pemanggil lama tidak perlu ikut diubah.
+    """
+    return _safe_filename(base, "ipynb", cadangan="catatan")

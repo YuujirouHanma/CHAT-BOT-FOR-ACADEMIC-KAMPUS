@@ -128,7 +128,7 @@ def main() -> int:
         return 1
 
     if not args.apply:
-        print(f"\nUJI-KERING. Tidak ada yang dihapus. Jalankan ulang dengan --apply")
+        print("\nUJI-KERING. Tidak ada yang dihapus. Jalankan ulang dengan --apply")
         print(f"untuk benar-benar membuang {len(yatim)} titik.")
         return 0
 

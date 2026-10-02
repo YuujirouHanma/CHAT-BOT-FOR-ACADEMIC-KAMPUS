@@ -13,28 +13,32 @@ from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
 
+import httpx
+
 from src.config import settings
 from src.utils.logger import logger
+from src.utils.openrouter import OPENROUTER_API_BASE_URL, openrouter_headers
 
-# Anggaran token untuk SATU pasangan — kueri dan potongan digabung, bukan per
-# sisi. Dulu argumen ini tidak pernah dikirim ke `compute_score`, sehingga
-# FlagReranker diam-diam memakai 512: potongan indeks kami bermedian 432 token
-# dengan maksimum 519 (15 dari 44 potongan di atas 480), jadi begitu token kueri
-# ikut dihitung, sebagian ekor dokumen memang dibuang tanpa satu pun catatan.
+# Anggaran token untuk SATU pasangan pada jalur LOKAL — kueri dan potongan
+# digabung, bukan per sisi. Dulu argumen ini tidak pernah dikirim ke
+# `compute_score`, sehingga FlagReranker diam-diam memakai 512: potongan
+# indeks kami bermedian 432 token dengan maksimum 519 (15 dari 44 potongan di
+# atas 480), jadi begitu token kueri ikut dihitung, sebagian ekor dokumen
+# memang dibuang tanpa satu pun catatan.
 #
-# Angkanya sengaja TETAP 512, bukan dinaikkan. Cross-encoder ini berjalan di CPU
-# dengan ongkos ±1,96 detik per pasangan (39 detik untuk 20 pasangan) dan ongkos
-# itu naik seiring panjang urutan; melebarkan batas ke 768 demi menyelamatkan
-# belasan token ekor pada sebagian kecil potongan berarti menambah puluhan detik
-# pada SETIAP pertanyaan mahasiswa — pertukaran yang buruk, karena kalimat
-# terakhir sebuah potongan jarang menjadi penentu peringkatnya.
+# Angkanya sengaja TETAP 512, bukan dinaikkan. Cross-encoder ini berjalan di
+# CPU dengan ongkos kira-kira 1,96 detik per pasangan, dan ongkos itu naik
+# seiring panjang urutan; melebarkan batas demi menyelamatkan belasan token
+# ekor pada sebagian kecil potongan berarti menambah puluhan detik pada
+# SETIAP pertanyaan mahasiswa.
 #
-# Yang diperbaiki di sini bukan angkanya, melainkan ketidaktahuannya: batas kini
-# dikirim eksplisit (perilaku sama, tetapi jadi keputusan yang tertulis) dan
-# setiap pasangan yang terpotong dicatat lewat `_log_truncated_pairs`. Dengan
-# begitu, menaikkan batas kelak menjadi keputusan berdasar data terukur — dan
-# menaikkannya kini cukup lewat `RERANKER_MAX_LENGTH` di .env, tanpa menyunting
-# berkas ini.
+# Yang diperbaiki bukan angkanya, melainkan ketidaktahuannya: batas kini
+# dikirim eksplisit dan setiap pasangan yang terpotong dicatat. Menaikkannya
+# kelak cukup lewat RERANKER_MAX_LENGTH di .env, tanpa menyunting berkas ini.
+#
+# TIDAK berlaku untuk jalur openrouter: model rerank terkelola (cohere/
+# rerank-4-pro) memotong sendiri di sisi penyedia dengan jendela jauh lebih
+# lebar, dan API-nya tidak menerima parameter panjang sama sekali.
 
 
 @lru_cache(maxsize=1)
@@ -69,6 +73,11 @@ class Reranker:
             self._model = _load_reranker_model()
         return self._model
 
+    async def warmup(self) -> None:
+        """Load the local reranker model during startup when using local mode."""
+        if settings.reranker_backend == "local":
+            await asyncio.to_thread(self._ensure_model)
+
     async def rerank(
         self,
         query: str,
@@ -96,9 +105,10 @@ class Reranker:
         top_k = top_k or settings.rerank_top_k
 
         pairs = []
-        # Penanda dibawa terpisah supaya peringatan pemotongan menyebut potongan
-        # yang mana — tanpa itu, catatan "3 pasangan terpotong" tidak bisa
-        # ditindaklanjuti karena tak ada yang tahu dokumen apa yang dirugikan.
+        # Penanda dibawa terpisah supaya peringatan pemotongan menyebut
+        # potongan yang mana — tanpa itu, catatan "3 pasangan terpotong"
+        # tidak bisa ditindaklanjuti karena tak ada yang tahu dokumen apa
+        # yang dirugikan.
         labels = []
         for i, c in enumerate(candidates):
             text = (c.get("payload") or {}).get(text_field, "")
@@ -115,7 +125,9 @@ class Reranker:
 
         result = scored[:top_k]
         logger.info(
-            f"Reranked {len(candidates)} → top {len(result)}, best score={result[0]['rerank_score'] if result else 0.0:.3f}"
+            "Reranked {} → top {}, best score={:.3f}",
+            len(candidates), len(result),
+            result[0]["rerank_score"] if result else 0.0,
         )
         return result
 
@@ -123,13 +135,21 @@ class Reranker:
         self, pairs: list[list[str]], labels: list[str] | None = None
     ) -> list[float]:
         """Sync score computation. Called inside asyncio.to_thread."""
+        if settings.reranker_backend == "openrouter":
+            # Jalur terkelola: batas panjangnya milik penyedia, bukan milik
+            # kode ini, jadi tidak ada pemotongan yang bisa dicatat di sini.
+            return self._compute_scores_openrouter(pairs)
+
         model = self._ensure_model()
         self._log_truncated_pairs(model, pairs, labels)
         # `max_length` dikirim eksplisit: batasnya harus milik kode ini, bukan
-        # bawaan pustaka yang bisa berubah di versi berikutnya tanpa kami sadari.
-        scores = model.compute_score(pairs, normalize=True, max_length=self._max_length)
+        # bawaan pustaka yang bisa berubah di versi berikutnya tanpa kami
+        # sadari.
+        scores = model.compute_score(
+            pairs, normalize=True, max_length=self._max_length
+        )
 
-        if isinstance(scores, (int, float)):
+        if isinstance(scores, int | float):
             return [float(scores)]
         return [float(s) for s in scores]
 
@@ -138,11 +158,11 @@ class Reranker:
     ) -> None:
         """Catat pasangan yang ekornya dibuang karena melewati `max_length`.
 
-        Pemotongan itu sendiri diterima (lihat settings.reranker_max_length), yang tidak
-        diterima adalah pemotongan yang tak terlihat: skor dokumen yang separuh
-        isinya tidak pernah dibaca model tampak sama saja dengan skor dokumen
-        utuh. Catatan ini yang memberi tahu bahwa peringkat sedang dihitung atas
-        teks yang tidak lengkap.
+        Pemotongannya sendiri diterima (lihat catatan di kepala modul); yang
+        tidak diterima adalah pemotongan yang tak terlihat: skor dokumen yang
+        separuh isinya tidak pernah dibaca model tampak sama saja dengan skor
+        dokumen utuh. Catatan ini yang memberi tahu bahwa peringkat sedang
+        dihitung atas teks yang tidak lengkap.
         """
         lengths = self._pair_token_lengths(model, pairs)
         if not lengths:
@@ -152,15 +172,18 @@ class Reranker:
         if not over:
             return
 
-        names = [labels[i] if labels and i < len(labels) else f"#{i}" for i, _ in over]
+        names = [
+            labels[i] if labels and i < len(labels) else f"#{i}" for i, _ in over
+        ]
+        terpanjang = max(n for _, n in over)
         logger.warning(
             "Reranker memotong {} dari {} pasangan pada max_length={} "
             "(terpanjang {} token, kelebihan {}); potongan terdampak: {}",
             len(over),
             len(pairs),
             self._max_length,
-            max(n for _, n in over),
-            max(n for _, n in over) - self._max_length,
+            terpanjang,
+            terpanjang - self._max_length,
             ", ".join(names),
         )
 
@@ -195,3 +218,59 @@ class Reranker:
             # Pencatatan tidak boleh menggagalkan reranking yang sudah berjalan.
             logger.debug("Lewati pemeriksaan pemotongan reranker: {}", exc)
             return []
+
+    def _compute_scores_openrouter(self, pairs: list[list[str]]) -> list[float]:
+        if not pairs:
+            return []
+
+        query = pairs[0][0]
+        documents = [pair[1] for pair in pairs]
+
+        payload = {
+            "model": settings.reranker_model,
+            "query": query,
+            "documents": documents,
+            "top_n": len(documents),
+            "provider": {"allow_fallbacks": True},
+        }
+
+        try:
+            response = httpx.post(
+                f"{OPENROUTER_API_BASE_URL}/rerank",
+                headers=openrouter_headers(),
+                json=payload,
+                timeout=120.0,
+            )
+            response.raise_for_status()
+        except Exception as exc:
+            raise RuntimeError(f"OpenRouter rerank request failed: {exc}") from exc
+
+        data = response.json()
+        raw_results = data.get("results") or data.get("data") or data.get("scores") or []
+
+        scores = [0.0] * len(documents)
+        if isinstance(raw_results, list):
+            for position, item in enumerate(raw_results):
+                if isinstance(item, int | float):
+                    if position < len(scores):
+                        scores[position] = float(item)
+                    continue
+
+                if not isinstance(item, dict):
+                    continue
+
+                index = item.get("index", position)
+                score = item.get("relevance_score")
+                if score is None:
+                    score = item.get("score")
+                if score is None:
+                    score = item.get("rerank_score")
+                if score is None:
+                    continue
+
+                try:
+                    scores[int(index)] = float(score)
+                except (TypeError, ValueError, IndexError):
+                    continue
+
+        return scores

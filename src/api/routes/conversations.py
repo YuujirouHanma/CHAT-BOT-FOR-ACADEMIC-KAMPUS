@@ -137,7 +137,7 @@ async def delete_conversation(
     Penghapusan dibatasi pada direktori tenant pemanggil, sehingga sebuah id
     milik tenant lain hanya menghasilkan 404 — bukan menghapus data orang lain.
     """
-    session_store.drop(conversation_id, tenant_id=tenant.tenant_id)
+    await session_store.drop(conversation_id, tenant_id=tenant.tenant_id)
     if not conversation_store.delete(conversation_id, tenant_id=tenant.tenant_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

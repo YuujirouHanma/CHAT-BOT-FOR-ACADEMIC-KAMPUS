@@ -129,6 +129,7 @@ def _auth_dependencies() -> tuple:
         auth.tenant_content_read,
         auth.tenant_content_write,
         auth.tenant_conversation_read,
+        auth.tenant_history_read,
         auth.tenant_conversation_delete,
         auth.tenant_admin,
     )

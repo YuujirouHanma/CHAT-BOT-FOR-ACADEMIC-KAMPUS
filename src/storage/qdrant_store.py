@@ -609,12 +609,128 @@ class QdrantStore:
                 return str(p["course_id"])
         return None
 
-    async def delete_by_source(self, source_file: str, *, tenant_id: str) -> None:
-        """Delete all chunks belonging to one source file, milik tenant ini saja.
+    async def sample_texts(
+        self,
+        content_id: str | None = None,
+        section_ids: Sequence[int] | None = None,
+        limit: int = 8,
+        *,
+        tenant_id: str,
+    ) -> list[str]:
+        """Teks beberapa potongan pertama yang cocok — cuplikan, bukan seluruhnya.
 
-        Filter tenant di sini bukan sekadar kerapian: tanpa itu, dua pelanggan
+        Dipakai /guided/topic-hints untuk menebak topik materi tanpa membaca
+        seluruh isinya. Sengaja lewat sini, bukan menyentuh klien Qdrant
+        langsung dari rute, supaya tidak ada jalur baca yang lolos dari saringan
+        kampus.
+
+        `section_ids` adalah nama minggu versi portal; di payload medannya
+        bernama `week`. Lihat `scroll_all` untuk alasan pemetaannya.
+        """
+        qfilter = self._build_filter(
+            tenant_id=tenant_id,
+            content_id=content_id,
+            weeks=[int(s) for s in section_ids] if section_ids else None,
+        )
+        batch, _ = await asyncio.to_thread(
+            self._client.scroll,
+            collection_name=self._collection,
+            scroll_filter=qfilter,
+            limit=limit,
+            with_payload=["text"],
+            with_vectors=False,
+        )
+        return [(p.payload or {}).get("text") or "" for p in batch]
+
+    async def scroll_all(
+        self,
+        content_id: str | None = None,
+        section_ids: Sequence[int] | None = None,
+        source_filter: str | None = None,
+        payload_fields: Sequence[str] | None = None,
+        batch_size: int = 100,
+        *,
+        tenant_id: str,
+    ) -> list[dict]:
+        """Seluruh potongan yang cocok dengan saringan, bukan sekadar cuplikan.
+
+        Berbeda dari `search()`, fungsi ini tidak memakai vektor sama sekali dan
+        tidak membatasi jumlah hasil. Pemanggil yang butuh gambaran utuh satu
+        minggu — penyusunan peta konsep, bank soal — harus melihat semuanya:
+        mengambil N potongan pertama berarti mengambil bagian sembarang dari
+        materi, dan konsep yang kebetulan ada di bagian akhir tidak pernah
+        terbaca.
+
+        `section_ids` adalah nama yang dipakai portal kampus untuk minggu
+        perkuliahan; di payload kita medannya bernama `week`. Pemetaannya di
+        sini saja, supaya hanya ada satu nama di dalam penyimpanan.
+
+        Returns:
+            Daftar {"chunk_id", "payload"} dalam urutan apa adanya dari Qdrant.
+        """
+        qfilter = self._build_filter(
+            tenant_id=tenant_id,
+            source_filter=source_filter,
+            content_id=content_id,
+            weeks=[int(s) for s in section_ids] if section_ids else None,
+        )
+
+        hasil: list[dict] = []
+        offset: Any = None
+        while True:
+            batch, offset = await asyncio.to_thread(
+                self._client.scroll,
+                collection_name=self._collection,
+                scroll_filter=qfilter,
+                limit=batch_size,
+                offset=offset,
+                with_payload=list(payload_fields) if payload_fields else True,
+                with_vectors=False,
+            )
+            hasil.extend({"chunk_id": t.id, "payload": t.payload or {}} for t in batch)
+            # Qdrant memberi offset None saat halaman terakhir sudah terbaca.
+            if offset is None:
+                break
+        return hasil
+
+    async def delete_by_content_id(self, content_id: str, *, tenant_id: str) -> None:
+        """Hapus seluruh potongan milik satu materi di satu kampus.
+
+        Dipakai sebelum indeks ulang menyeluruh. Menghapus per berkas tidak cukup
+        di sana: potongan lama tersimpan dengan nama berkas asli, sedangkan
+        basis data hanya menyimpan nama tersimpan yang sudah disanitasi, sehingga
+        sebagian sisa tidak pernah cocok dan menumpuk sebagai kembaran.
+
+        Saringan tenant di sini mutlak: kampus lain hampir pasti punya
+        "sbd-minggu-1" juga, dan tanpa saringan itu indeks ulang satu kampus
+        ikut menghapus materi kampus lain.
+        """
+        if not content_id:
+            raise ValueError("content_id wajib diisi")
+        await asyncio.to_thread(
+            self._client.delete,
+            collection_name=self._collection,
+            points_selector=qm.FilterSelector(
+                filter=self._build_filter(tenant_id=tenant_id, content_id=content_id)
+            ),
+        )
+        logger.info(
+            "Seluruh potongan content_id='{}' dihapus (tenant={})", content_id, tenant_id,
+        )
+
+    async def delete_by_source(
+        self, source_file: str, *, content_id: str | None = None, tenant_id: str,
+    ) -> None:
+        """Hapus seluruh potongan satu berkas sumber, milik kampus ini saja.
+
+        Saringan kampus di sini bukan sekadar kerapian: tanpa itu, dua pelanggan
         yang kebetulan mengunggah berkas bernama sama ("bab1.pdf") akan saling
         menghapus materi — kehilangan data permanen tanpa jejak yang jelas.
+
+        `content_id` mempersempit lebih jauh, ke satu materi saja. Satu kampus
+        pun lazim memakai nama berkas yang sama di beberapa minggu, dan tanpa
+        penyempitan itu menghapus satu berkas ikut menghapus namanya di seluruh
+        materi kampus tersebut.
         """
         tenant_id = require_tenant_id(tenant_id, operation="delete_by_source")
         await asyncio.to_thread(
@@ -623,11 +739,13 @@ class QdrantStore:
             points_selector=qm.FilterSelector(
                 filter=self._build_filter(
                     tenant_id=tenant_id, source_filter=source_file,
+                    content_id=content_id,
                 )
             ),
         )
         logger.info(
-            "Deleted chunks for source_file='{}' (tenant={})", source_file, tenant_id,
+            "Potongan berkas '{}' dihapus (materi={}, tenant={})",
+            source_file, content_id or "seluruhnya", tenant_id,
         )
 
     async def delete_stale_chunks(

@@ -1,37 +1,38 @@
-"""Filesystem operations for the storage/ directory — dipisah per tenant.
+"""Filesystem operations for the storage/ directory.
 
-Convention:
+Convention (multi-kampus):
     storage/
       {tenant_id}/
         {content_id}/
           {any file — pdf, docx, mp4, zip, etc.}
+        _uploads/            ← unggahan tanpa content_id
+
+Tiap kampus punya direktorinya sendiri, dipisah secara FISIK: dua kampus yang
+sama-sama punya "class-3" tidak mungkin saling menimpa berkas, dan penyaringan
+saat baca tidak akan menolong bila kerusakannya sudah terjadi saat menulis.
+
+`content_id` dan nama berkas datang dari pemanggil lalu menjadi bagian path, jadi
+keduanya diperiksa ketat dan path hasilnya dipastikan (lewat `resolve()`) tetap
+berada di dalam direktori kampus pemanggil.
 
 Files are categorized by extension but ALL files are listed.
 Only "document" category files are indexable for RAG.
-
-ISOLASI: pemisahan dilakukan secara FISIK lewat direktori, bukan lewat penyaringan
-saat membaca. Dua pelanggan yang kebetulan memakai `content_id` sama — misalnya
-`sbd-minggu-2`, pola yang justru dianjurkan — akan menulis ke direktori berbeda,
-sehingga tidak mungkin saling menimpa berkas. Penyaringan saat baca tidak akan
-menolong di sini: kerusakannya sudah terjadi pada saat penulisan.
-
-`content_id` dan nama berkas berasal dari parameter URL, jadi keduanya
-divalidasi ketat DAN path hasilnya diperiksa ulang agar benar-benar berada di
-dalam direktori tenant. Dua lapis, karena satu kesalahan di sini berarti pembaca
-dapat menjangkau berkas milik tenant lain — atau berkas sistem — lewat `../`.
 """
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from src.config import settings
 from src.schemas import FileCategory
-from src.tenancy import require_tenant_id, storage_prefix
+from src.tenancy import storage_prefix
 
-# content_id menjadi nama direktori: huruf, angka, titik, strip, garis bawah.
-# Tanpa garis miring dan tanpa ".." — keduanya jalur keluar dari direktori induk.
+UPLOADS_DIRNAME = "_uploads"
+
+# Huruf, angka, titik, strip, garis bawah; diawali huruf/angka. Tanpa "/" dan "\"
+# — keduanya jalan keluar dari direktori induk. Pola ini juga mustahil bertabrakan
+# dengan `_uploads`.
 _CONTENT_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
@@ -65,12 +66,7 @@ class FileEntry:
 
     @property
     def is_indexable(self) -> bool:
-        """Documents parse directly; video/audio are indexed via transcription."""
-        return self.category in (
-            FileCategory.DOCUMENT,
-            FileCategory.VIDEO,
-            FileCategory.AUDIO,
-        )
+        return self.category == FileCategory.DOCUMENT
 
     @property
     def size_display(self) -> str:
@@ -82,45 +78,46 @@ class FileEntry:
 
 
 def storage_root(*, tenant_id: str) -> Path:
-    """Direktori milik satu tenant, dibuat bila belum ada."""
+    """Direktori milik satu kampus: storage/{tenant_id}/."""
     root = settings.storage_path / storage_prefix(tenant_id)
     root.mkdir(parents=True, exist_ok=True)
     return root
 
 
-def content_dir(content_id: str, *, tenant_id: str) -> Path | None:
-    """Direktori satu content_id, atau None bila namanya tidak sah.
-
-    Selain memvalidasi bentuk nama, hasil akhirnya diperiksa ulang dengan
-    `resolve()` untuk memastikan ia sungguh berada di dalam direktori tenant —
-    penjagaan berlapis terhadap bentuk path yang lolos regex namun tetap keluar
-    lewat symlink atau penulisan khas Windows.
-    """
+def content_dir(content_id: str, *, tenant_id: str) -> Path:
+    """storage/{tenant_id}/{content_id}/. ValueError bila content_id tidak sah."""
     if not is_valid_content_id(content_id):
-        return None
-    root = storage_root(tenant_id=tenant_id).resolve()
-    calon = (root / content_id).resolve()
-    if calon != root and root not in calon.parents:
-        return None
-    return calon
+        raise ValueError("content_id tidak valid")
+    root = storage_root(tenant_id=tenant_id)
+    path = root / content_id
+    # Lapis terakhir: nama boleh bersih tetapi direktorinya tetap bisa berupa
+    # symlink ke luar kampus ini.
+    if path.exists() and root.resolve() not in path.resolve().parents:
+        raise ValueError("content_id tidak valid")
+    return path
 
 
 def list_contents(*, tenant_id: str) -> list[str]:
-    """Seluruh content_id milik SATU tenant."""
     root = storage_root(tenant_id=tenant_id)
     return sorted(
         d.name for d in root.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
+        if d.is_dir() and is_valid_content_id(d.name)
     )
 
 
 def list_files(content_id: str, *, tenant_id: str) -> list[FileEntry]:
-    dir_ = content_dir(content_id, tenant_id=tenant_id)
-    if dir_ is None or not dir_.exists():
+    # content_id datang dari jalur URL, jadi bentuknya tidak dijamin. Dibiarkan
+    # melempar, permintaan dengan id tak sah dibalas 500 — seolah layanan rusak,
+    # padahal yang salah permintaannya. Daftar kosong membuat rute menjawab 404.
+    try:
+        directory = content_dir(content_id, tenant_id=tenant_id)
+    except ValueError:
+        return []
+    if not directory.exists():
         return []
 
     entries: list[FileEntry] = []
-    for f in dir_.iterdir():
+    for f in directory.iterdir():
         if f.is_file() and not f.name.startswith("."):
             entries.append(
                 FileEntry(
@@ -145,45 +142,47 @@ def list_files_by_category(
     return result
 
 
-def resolve_file(content_id: str, filename: str, *, tenant_id: str) -> Path | None:
-    """Path sebuah berkas, atau None bila namanya tidak sah / berkasnya tidak ada.
+def clean_filename(filename: str | None) -> str | None:
+    """Nama dasar berkas unggahan, atau None bila tidak layak dipakai.
 
-    Nama yang memuat pemisah path DITOLAK, bukan dinormalkan menjadi nama
-    dasarnya. Menormalkan terasa lebih ramah, tetapi berarti permintaan
-    `../bab1.pdf` diam-diam dilayani dengan berkas yang berbeda dari yang
-    diminta — menyembunyikan klien yang bermasalah sekaligus klien yang sedang
-    menjajaki batas. Menolak membuat keduanya terlihat.
-
-    Berbeda dari jalur unggah, yang memang menormalkan: peramban kadang
-    mengirim path lengkap, dan menolak unggahan karenanya hanya menyusahkan
-    tanpa menambah keamanan, sebab nama tujuannya kita yang tentukan.
+    Peramban dan klien Windows kadang mengirim path lengkap ("C:\\x\\bab1.pdf"),
+    jadi pemisah kedua gaya dibuang lebih dulu. Nama tersembunyi, "..", dan nama
+    bermuatan karakter kendali ditolak.
     """
-    dir_ = content_dir(content_id, tenant_id=tenant_id)
-    if dir_ is None:
+    nama = PureWindowsPath((filename or "").strip()).name
+    if not nama or nama.startswith(".") or nama in {".", ".."}:
         return None
+    if any(ord(c) < 32 for c in nama) or len(nama) > 255:
+        return None
+    return nama
 
-    nama = filename or ""
-    if not nama or nama.startswith(".") or ".." in nama:
-        return None
-    if "/" in nama or "\\" in nama or nama != Path(nama).name:
-        return None
 
-    p = (dir_ / nama).resolve()
-    # Lapis terakhir: nama boleh bersih tetapi tetap berupa symlink ke luar.
-    if dir_ not in p.parents:
+def resolve_file(content_id: str, filename: str, *, tenant_id: str) -> Path | None:
+    """Path sebuah berkas milik kampus ini, atau None bila tidak sah / tidak ada.
+
+    Nama bermuatan pemisah path DITOLAK, bukan dinormalkan: permintaan
+    `../bab1.pdf` yang diam-diam dilayani berkas lain menyembunyikan klien yang
+    bermasalah maupun yang sedang menjajaki batas.
+    """
+    try:
+        directory = content_dir(content_id, tenant_id=tenant_id)
+    except ValueError:
+        return None
+    if clean_filename(filename) != filename:
+        return None
+    p = (directory / filename).resolve()
+    if directory.resolve() not in p.parents:
         return None
     return p if p.exists() and p.is_file() else None
 
 
 def tenant_usage_bytes(*, tenant_id: str) -> int:
-    """Total ukuran berkas milik satu tenant. Dipakai menegakkan kuota simpan."""
-    require_tenant_id(tenant_id, operation="tenant_usage_bytes")
-    root = storage_root(tenant_id=tenant_id)
+    """Total ukuran berkas milik satu kampus. Dipakai menegakkan kuota simpan."""
     total = 0
-    for p in root.rglob("*"):
-        if p.is_file():
-            try:
+    for p in storage_root(tenant_id=tenant_id).rglob("*"):
+        try:
+            if p.is_file():
                 total += p.stat().st_size
-            except OSError:
-                continue
+        except OSError:
+            continue
     return total

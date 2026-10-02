@@ -45,14 +45,20 @@ _STATUS_CODES: dict[int, str] = {
 }
 
 
-def _rid(request: Request) -> str:
+def request_id(request: Request) -> str:
+    """Pengenal permintaan, dipakai bersama penangan galat dan rute.
+
+    Publik dan tinggal di sini, bukan di auth.py, supaya rute yang hanya
+    perlu mencatat pengenal tidak harus mengimpor seluruh modul
+    autentikasi — dan supaya kedua repo memakai jalur impor yang sama.
+    """
     return getattr(request.state, "request_id", "")
 
 
-def _body(
+def error_body(
     code: str, message: str, request: Request, extra: dict | None = None,
 ) -> dict:
-    payload = {"error": code, "detail": message, "request_id": _rid(request)}
+    payload = {"error": code, "detail": message, "request_id": request_id(request)}
     if extra:
         payload.update(extra)
     return payload
@@ -69,7 +75,7 @@ def install(app: FastAPI) -> None:
         logger.error("Operasi tanpa tenant ditolak: {}", exc)
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=_body(CODE_INTERNAL, "Terjadi galat internal", request),
+            content=error_body(CODE_INTERNAL, "Terjadi galat internal", request),
         )
 
     @app.exception_handler(TenantPermissionError)
@@ -79,7 +85,7 @@ def install(app: FastAPI) -> None:
         logger.warning("Akses ditolak: {}", exc)
         return JSONResponse(
             status_code=status.HTTP_403_FORBIDDEN,
-            content=_body(CODE_FORBIDDEN, "Akses ditolak", request),
+            content=error_body(CODE_FORBIDDEN, "Akses ditolak", request),
         )
 
     @app.exception_handler(RequestValidationError)
@@ -97,7 +103,7 @@ def install(app: FastAPI) -> None:
         ]
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            content=_body(
+            content=error_body(
                 CODE_VALIDATION, "Permintaan tidak valid", request,
                 {"fields": masalah},
             ),
@@ -117,7 +123,7 @@ def install(app: FastAPI) -> None:
             logger.error("HTTP {} pada {}: {}", exc.status_code, request.url.path, exc.detail)
         return JSONResponse(
             status_code=exc.status_code,
-            content=_body(kode, pesan, request),
+            content=error_body(kode, pesan, request),
             headers=getattr(exc, "headers", None) or None,
         )
 
@@ -130,5 +136,5 @@ def install(app: FastAPI) -> None:
         )
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content=_body(CODE_INTERNAL, "Terjadi galat internal", request),
+            content=error_body(CODE_INTERNAL, "Terjadi galat internal", request),
         )

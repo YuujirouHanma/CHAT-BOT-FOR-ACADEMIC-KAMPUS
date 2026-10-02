@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 
 from src.api.dependencies import get_pipeline
 from src.api.main import app
-from src.api.session import Session, SessionStore
-from src.pipeline import GuidedTurn, QueryResult
+from src.api.session import MemorySessionStore, Session
+from src.pipeline import QueryResult
 from src.storage import conversation_store
 from src.tenancy import TenantContext
 from tests.conftest import TEST_TENANT_ID as TENANT
@@ -24,6 +24,13 @@ from tests.conftest import TEST_TENANT_ID as TENANT
 
 @pytest.fixture
 def client(override_tenant: TenantContext) -> Generator[TestClient, None, None]:
+    # GuidedTurn diimpor di dalam fixture, bukan di puncak berkas: kelas uji
+    # penyimpanan di bawah tidak membutuhkannya sama sekali, dan impor di puncak
+    # membuat SELURUH berkas ini gagal dikumpulkan selama orkestrasi terpandu
+    # belum mendarat di pipeline. Yang gagal seharusnya hanya yang memang belum
+    # ada rutenya.
+    from src.pipeline import GuidedTurn
+
     pipeline = AsyncMock()
     pipeline.query = AsyncMock(
         return_value=QueryResult(
@@ -97,44 +104,57 @@ class TestStore:
 
 
 class TestSessionPersistence:
-    def test_reopens_after_memory_expiry(self) -> None:
-        """Inti fiturnya: percakapan tetap ada setelah session hangus dari RAM."""
-        store = SessionStore()
-        s = store.create(student_id="budi", tenant_id=TENANT)
+    """Penyimpan sesi di repo ini ASINKRON (memori atau Redis), jadi uji yang
+    dibawa dari sistem tim AI dipanggil dengan `await`. Yang diuji tetap sama:
+    percakapan harus selamat dari hangusnya sesi di lapis pertama."""
+
+    async def test_reopens_after_memory_expiry(self) -> None:
+        """Inti fiturnya: percakapan tetap ada setelah sesi hangus dari RAM."""
+        store = MemorySessionStore()
+        s = await store.get_or_create(None, tenant_id=TENANT, student_id="budi")
         s.record("user", "apa itu normalisasi?")
         s.record("assistant", "Normalisasi adalah...")
-        s.persist()
+        await store.save(s)
         sid = s.session_id
 
-        store_baru = SessionStore()          # seolah server baru dinyalakan
-        pulih = store_baru.get(sid, tenant_id=TENANT)
+        store_baru = MemorySessionStore()    # seolah server baru dinyalakan
+        pulih = await store_baru.get(sid, tenant_id=TENANT)
         assert pulih is not None
         assert pulih.student_id == "budi"
         assert pulih.title == "apa itu normalisasi?"
         assert [m["content"] for m in pulih.transcript][0] == "apa itu normalisasi?"
 
-    def test_context_survives_reload(self) -> None:
-        store = SessionStore()
-        s = store.create(tenant_id=TENANT)
+    async def test_context_survives_reload(self) -> None:
+        store = MemorySessionStore()
+        s = await store.get_or_create(None, tenant_id=TENANT)
         s.apply_guided("sbd", "Sistem Basis Data", [3, 4], "sbd-minggu-3", "bab3.pdf")
         s.style = "visual"
         s.topic = "Normalisasi"
-        s.persist()
+        await store.save(s)
 
-        pulih = SessionStore().get(s.session_id, tenant_id=TENANT)
+        pulih = await MemorySessionStore().get(s.session_id, tenant_id=TENANT)
         assert pulih is not None
         assert (pulih.course_id, pulih.weeks) == ("sbd", [3, 4])
         assert (pulih.style, pulih.topic) == ("visual", "Normalisasi")
 
-    def test_running_quiz_is_not_restored(self) -> None:
+    async def test_running_quiz_is_not_restored(self) -> None:
         """Melanjutkan kuis berhari-hari kemudian di tengah soal membingungkan."""
-        store = SessionStore()
-        s = store.create(tenant_id=TENANT)
+        store = MemorySessionStore()
+        s = await store.get_or_create(None, tenant_id=TENANT)
         s.start_quiz([{"question": "q", "options": ["a", "b"], "answer_index": 0}])
-        s.persist()
-        pulih = SessionStore().get(s.session_id, tenant_id=TENANT)
+        await store.save(s)
+        pulih = await MemorySessionStore().get(s.session_id, tenant_id=TENANT)
         assert pulih is not None
         assert pulih.quiz is None
+
+    async def test_save_reaches_disk_without_a_second_call(self) -> None:
+        """`save()` sekaligus menulis ke disk — tidak ada langkah kedua yang bisa
+        terlupa di salah satu rute, yang dulu berarti riwayat hilang diam-diam."""
+        store = MemorySessionStore()
+        s = await store.get_or_create(None, tenant_id=TENANT)
+        s.record("user", "pertanyaan yang cukup panjang")
+        await store.save(s)
+        assert conversation_store.load(s.session_id, tenant_id=TENANT) is not None
 
     def test_greeting_does_not_become_the_title(self) -> None:
         s = Session(session_id="x", tenant_id=TENANT)

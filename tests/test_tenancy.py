@@ -22,10 +22,11 @@ import pytest
 from qdrant_client import QdrantClient
 
 from src import gen_cache
-from src.api.session import Session, SessionStore
+from src.api.session import MemorySessionStore as SessionStore
+from src.api.session import Session
 from src.schemas import Chunk, ElementType
 from src.security import audit, crypto, keys, redact
-from src.security.ratelimit import AuthThrottle, RateLimiter
+from src.security.ratelimit import AuthThrottle, MemoryBackend, TenantRateLimiter
 from src.storage import content_store, conversation_store, tenant_store
 from src.storage.qdrant_store import TENANT_FIELD, QdrantStore
 from src.tenancy import (
@@ -249,7 +250,7 @@ class TestTenantStore:
         assert secret not in isi
         assert k.raw not in isi
 
-    def test_berkas_rusak_tidak_mematikan_autentikasi_tenant_lain(self) -> None:
+    async def test_berkas_rusak_tidak_mematikan_autentikasi_tenant_lain(self) -> None:
         """Satu berkas gagal baca tidak boleh menjatuhkan seluruh layanan."""
         tenant_store.create_tenant(A)
         k = tenant_store.issue_key(A)
@@ -388,7 +389,7 @@ class TestQdrantFilterSelaluBertenant:
         )
         assert TENANT_FIELD in {c.key for c in f.must}
 
-    def test_tanpa_tenant_gagal_bukan_mencari_semua(self) -> None:
+    async def test_tanpa_tenant_gagal_bukan_mencari_semua(self) -> None:
         with pytest.raises(TenantScopeError):
             QdrantStore._build_filter(tenant_id="")
 
@@ -530,7 +531,24 @@ class TestContentStoreIsolation:
         "jahat", ["../kampus-b", "..", "a/b", "", ".tersembunyi", "a" * 200],
     )
     def test_content_id_berbahaya_ditolak(self, jahat: str) -> None:
-        assert content_store.content_dir(jahat, tenant_id=A) is None
+        """Ditolak dengan melempar, bukan mengembalikan None diam-diam.
+
+        Melempar memaksa pemanggil memutuskan apa yang harus dilakukan; nilai
+        None mudah lolos tanpa diperiksa lalu dipakai sebagai direktori.
+        """
+        with pytest.raises(ValueError):
+            content_store.content_dir(jahat, tenant_id=A)
+
+    @pytest.mark.parametrize(
+        "jahat", ["../kampus-b", "..", "a/b", "", ".tersembunyi", "a" * 200],
+    )
+    def test_daftar_berkas_id_berbahaya_kosong(self, jahat: str) -> None:
+        """Rute jelajah berkas harus menjawab 404, bukan 500.
+
+        id tak sah datang dari jalur URL, jadi bentuknya tidak dijamin;
+        memperlakukannya sebagai kerusakan layanan menyesatkan.
+        """
+        assert content_store.list_files(jahat, tenant_id=A) == []
 
     @pytest.mark.parametrize(
         "jahat",
@@ -618,35 +636,35 @@ class TestSessionIsolation:
     def _dir(self, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(conversation_store, "CONVERSATION_DIR", tmp_path / "conv")
 
-    def test_session_tenant_lain_tidak_terbaca(self) -> None:
+    async def test_session_tenant_lain_tidak_terbaca(self) -> None:
         store = SessionStore()
-        s = store.create(tenant_id=A, student_id="2021001")
+        s = await store.get_or_create(None, tenant_id=A, student_id="2021001")
         s.record("user", "apa itu normalisasi")
         s.persist()
 
-        assert store.get(s.session_id, tenant_id=A) is not None
-        assert store.get(s.session_id, tenant_id=B) is None
+        assert await store.get(s.session_id, tenant_id=A) is not None
+        assert await store.get(s.session_id, tenant_id=B) is None
 
-    def test_session_id_bocor_tidak_dapat_dipakai_tenant_lain(self) -> None:
+    async def test_session_id_bocor_tidak_dapat_dipakai_tenant_lain(self) -> None:
         """`session_id` bolak-balik lewat klien; ia harus dianggap bisa dicuri."""
         store = SessionStore()
-        s = store.create(tenant_id=A)
+        s = await store.get_or_create(None, tenant_id=A)
         s.persist()
 
-        pulih = store.get_or_create(s.session_id, tenant_id=B)
+        pulih = await store.get_or_create(s.session_id, tenant_id=B)
         assert pulih.session_id != s.session_id, \
             "tenant B mengambil alih session tenant A"
         assert pulih.tenant_id == B
 
-    def test_cache_memori_terpisah(self) -> None:
+    async def test_cache_memori_terpisah(self) -> None:
         """Cache berkunci tunggal akan melewati pemisahan direktori di disk."""
         store = SessionStore()
-        a = store.create(tenant_id=A)
-        assert store.get(a.session_id, tenant_id=B) is None
+        a = await store.get_or_create(None, tenant_id=A)
+        assert await store.get(a.session_id, tenant_id=B) is None
 
-    def test_session_menolak_tenant_kosong(self) -> None:
+    async def test_session_menolak_tenant_kosong(self) -> None:
         with pytest.raises(TenantScopeError):
-            SessionStore().create(tenant_id="")
+            await SessionStore().get_or_create(None, tenant_id="")
 
     def test_tenant_diambil_dari_kredensial_bukan_berkas(self) -> None:
         """Berkas menentukan isinya, bukan siapa yang berhak membacanya."""
@@ -716,36 +734,31 @@ class TestAuditChain:
 # --- pembatasan laju -------------------------------------------------------
 
 class TestRateLimit:
-    def test_batas_per_tenant_ditegakkan(self) -> None:
-        lim = RateLimiter()
-        for _ in range(5):
-            assert lim.check(
-                ip=None, key_id=None, tenant_id=A,
-                per_minute=5, per_day=100, ip_per_minute=0,
-            ).allowed
-        assert not lim.check(
-            ip=None, key_id=None, tenant_id=A,
-            per_minute=5, per_day=100, ip_per_minute=0,
-        ).allowed
+    """Pembatas laju kini asinkron dan memisahkan jatah IP dari jatah kampus.
 
-    def test_tenant_yang_boros_tidak_menghabiskan_jatah_tenant_lain(self) -> None:
+    Pemisahan itu bukan kerapian: jatah IP menjaga gerbang autentikasi sebelum
+    penyimpanan disentuh sama sekali, sedangkan jatah kampus baru berlaku
+    sesudah kuncinya dikenali.
+    """
+
+    async def test_batas_per_tenant_ditegakkan(self) -> None:
+        lim = TenantRateLimiter(MemoryBackend())
+        for _ in range(5):
+            assert (await lim.check(A, per_minute=5, per_day=100)).allowed
+        assert not (await lim.check(A, per_minute=5, per_day=100)).allowed
+
+    async def test_tenant_yang_boros_tidak_menghabiskan_jatah_tenant_lain(self) -> None:
         """Kalau jatah dipakai bersama, satu pelanggan dapat menjatuhkan yang lain."""
-        lim = RateLimiter()
+        lim = TenantRateLimiter(MemoryBackend())
         for _ in range(5):
-            lim.check(ip=None, key_id=None, tenant_id=A,
-                      per_minute=5, per_day=100, ip_per_minute=0)
-        assert lim.check(
-            ip=None, key_id=None, tenant_id=B,
-            per_minute=5, per_day=100, ip_per_minute=0,
-        ).allowed
+            await lim.check(A, per_minute=5, per_day=100)
+        assert (await lim.check(B, per_minute=5, per_day=100)).allowed
 
-    def test_penolakan_menyebut_lama_menunggu(self) -> None:
-        lim = RateLimiter()
+    async def test_penolakan_menyebut_lama_menunggu(self) -> None:
+        lim = TenantRateLimiter(MemoryBackend())
         for _ in range(2):
-            lim.check(ip="1.1.1.1", key_id=None, tenant_id=None,
-                      per_minute=0, per_day=0, ip_per_minute=2)
-        putusan = lim.check(ip="1.1.1.1", key_id=None, tenant_id=None,
-                            per_minute=0, per_day=0, ip_per_minute=2)
+            await lim.check_ip("1.1.1.1", per_minute=2)
+        putusan = await lim.check_ip("1.1.1.1", per_minute=2)
         assert not putusan.allowed and putusan.retry_after >= 1
 
     def test_perlambatan_naik_setelah_gagal_berulang(self) -> None:

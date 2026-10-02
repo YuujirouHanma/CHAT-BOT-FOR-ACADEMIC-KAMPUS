@@ -58,8 +58,11 @@ def cmd_issue_key(args: argparse.Namespace) -> int:
     else:
         scopes = set(READER_SCOPES)
 
+    # Diurutkan dan dibuang kembarannya: nilainya jadi baku apa pun urutan
+    # ketik operator, sehingga dua kunci dengan cakupan sama tersimpan sama
+    # persis dan perubahan berkas tenant mudah dibaca.
     courses = (
-        [c.strip() for c in args.courses.split(",") if c.strip()]
+        sorted({c.strip() for c in args.courses.split(",") if c.strip()})
         if args.courses else None
     )
 
@@ -196,7 +199,12 @@ def cmd_verify_audit(args: argparse.Namespace) -> int:
     return 1 if rusak else 0
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    """Titik masuk CLI.
+
+    `argv` diterima sebagai argumen, bukan dibaca dari sys.argv, supaya
+    perintahnya dapat diuji langsung tanpa menjalankan proses terpisah.
+    """
     p = argparse.ArgumentParser(prog="tenantctl", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -247,7 +255,7 @@ def main() -> int:
     v.add_argument("tenant_id")
     v.set_defaults(fn=cmd_verify_audit)
 
-    args = p.parse_args()
+    args = p.parse_args(argv)
     return int(args.fn(args))
 
 

@@ -20,6 +20,7 @@ lalu lintas sampah tersaring sebelum menyentuh penyimpanan:
 """
 from __future__ import annotations
 
+import hmac
 import uuid
 from collections.abc import Awaitable, Callable
 
@@ -122,10 +123,8 @@ async def require_tenant(
 
     # 1 — batas laju per IP, sebelum menyentuh penyimpanan apa pun.
     if settings.rate_limit_enabled:
-        putusan = limiter.check(
-            ip=ip, key_id=None, tenant_id=None,
-            per_minute=0, per_day=0,
-            ip_per_minute=settings.rate_limit_ip_per_minute,
+        putusan = await limiter.check_ip(
+            ip, per_minute=settings.rate_limit_ip_per_minute,
         )
         if not putusan.allowed:
             audit.record(
@@ -158,11 +157,10 @@ async def require_tenant(
 
     # 4 — kuota kunci & tenant.
     if settings.rate_limit_enabled:
-        putusan = limiter.check(
-            ip=None, key_id=tenant.key_id, tenant_id=tenant.tenant_id,
+        putusan = await limiter.check(
+            tenant.tenant_id,
             per_minute=tenant.quota.requests_per_minute,
             per_day=tenant.quota.requests_per_day,
-            ip_per_minute=0,
         )
         if not putusan.allowed:
             audit.record(
@@ -209,7 +207,15 @@ def _resolve(
 
     # Jalur warisan: satu kunci global tanpa identitas tenant.
     warisan = settings.ragacademic_api_key.get_secret_value()
-    if warisan and api_key == warisan and not settings.is_production:
+    # compare_digest, bukan ==. Perbandingan string biasa berhenti pada huruf
+    # pertama yang berbeda, sehingga lama waktunya membocorkan berapa banyak
+    # huruf awal yang sudah tepat — cukup untuk menebak kunci sepotong demi
+    # sepotong tanpa pernah menebaknya utuh.
+    if (
+        warisan
+        and not settings.is_production
+        and hmac.compare_digest(api_key.encode(), warisan.encode())
+    ):
         auth_throttle.record_success(ip)
         return _legacy_tenant()
 
@@ -291,6 +297,11 @@ tenant_chat = require_scope(SCOPE_CHAT)
 tenant_catalog = require_scope(SCOPE_CATALOG_READ)
 tenant_content_read = require_scope(SCOPE_CONTENT_READ)
 tenant_content_write = require_scope(SCOPE_CONTENT_WRITE)
+# Dipetakan ke conversation:read, BUKAN scope baru bernama history:read.
+# Keduanya menjaga hal yang sama persis — isi percakapan mahasiswa — dan
+# menambah nama kedua berarti setiap kunci harus membawa dua scope untuk
+# satu kemampuan.
+tenant_history_read = require_scope(SCOPE_CONVERSATION_READ)
 tenant_conversation_read = require_scope(SCOPE_CONVERSATION_READ)
 tenant_conversation_delete = require_scope(SCOPE_CONVERSATION_DELETE)
 tenant_validate = require_scope(SCOPE_VALIDATE)

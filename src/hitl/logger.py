@@ -36,11 +36,11 @@ def log_dir(tenant_id: str) -> Path:
 
 
 def _json_safe(obj: Any) -> Any:
-    if obj is None or isinstance(obj, (str, int, float, bool)):
+    if obj is None or isinstance(obj, str | int | float | bool):
         return obj
     if isinstance(obj, dict):
         return {str(k): _json_safe(v) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple, set)):
+    if isinstance(obj, list | tuple | set):
         return [_json_safe(x) for x in obj]
     return str(obj)
 
@@ -60,6 +60,11 @@ def log_interaction(
     elapsed_seconds: float,
     content_id: str | None = None,
     session_id: str | None = None,
+    # Keduanya ikut direkam supaya riwayat dapat disaring per mahasiswa.
+    # `student_name` bisa diganti sendiri oleh mahasiswa, jadi penyaringan
+    # memakai `user_id` yang stabil; namanya hanya untuk ditampilkan.
+    student_name: str | None = None,
+    user_id: int | None = None,
     *,
     tenant_id: str,
 ) -> str:
@@ -72,6 +77,8 @@ def log_interaction(
         "tenant_id": tenant_id,
         "session_id": session_id,
         "content_id": content_id,
+        "student_name": student_name,
+        "user_id": user_id,
         "question": question,
         "decomposition": dq,
         "answer": answer,
@@ -133,3 +140,44 @@ def log_feedback(
         "comment": comment or "",
     }
     _append_jsonl(log_dir(tenant_id) / FEEDBACK_LOG, redact.scrub(record))
+
+def read_conversation_logs(
+    content_id: str | None = None,
+    user_id: int | None = None,
+    limit: int = 20,
+    offset: int = 0,
+    *,
+    tenant_id: str,
+) -> tuple[list[dict[str, Any]], int]:
+    """Read logged chat interactions of ONE campus, newest first, optionally
+    filtered by content_id and/or user_id (the latter for a single student's own
+    history — student_name alone isn't a safe filter key since it's free text a
+    student can change, and isn't guaranteed unique).
+
+    Returns (page_of_records, total_matching_count). Malformed lines (there
+    shouldn't be any, but this file is hand-editable) are skipped rather than
+    failing the whole read.
+    """
+    path = log_dir(tenant_id) / CONVERSATION_LOG
+    if not path.exists():
+        return [], 0
+
+    records: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if content_id is not None and record.get("content_id") != content_id:
+                continue
+            if user_id is not None and record.get("user_id") != user_id:
+                continue
+            records.append(record)
+
+    records.sort(key=lambda r: r.get("timestamp") or "", reverse=True)
+    total = len(records)
+    return records[offset : offset + limit], total

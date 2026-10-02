@@ -16,7 +16,7 @@ penggantinya cukup mengganti isi fungsi, bukan seluruh pemanggilnya.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +26,9 @@ from src.evaluation import EvaluationSchedule
 from src.security import keys as key_utils
 from src.tenancy import (
     ALL_SCOPES,
+    LEGACY_FULL_SCOPES,
     READER_SCOPES,
+    SCOPE_ADMIN,
     TenantContext,
     TenantQuota,
     is_valid_tenant_id,
@@ -79,7 +81,11 @@ class ApiKeyRecord:
             key_id=d["key_id"],
             secret_hash=d["secret_hash"],
             label=d.get("label", ""),
-            scopes=list(d.get("scopes") or sorted(READER_SCOPES)),
+            # Disetarakan di sini, saat rekaman dibaca, supaya setiap
+            # pemakai rekaman melihat hak yang sama — bukan hanya jalur
+            # autentikasi.
+            scopes=sorted(_naikkan_hak_warisan(
+                set(d.get("scopes") or READER_SCOPES))),
             allowed_courses=(
                 list(d["allowed_courses"]) if d.get("allowed_courses") else None
             ),
@@ -133,7 +139,15 @@ class Tenant:
                 max_upload_mb=int(kuota.get("max_upload_mb", 100)),
                 max_storage_mb=int(kuota.get("max_storage_mb", 20_000)),
             ),
-            api_keys=[ApiKeyRecord.from_dict(k) for k in (d.get("api_keys") or [])],
+            # Menerima DUA nama medan. Berkas tenant yang ditulis layanan tim
+            # back-end memakai "keys"; yang ditulis di sini memakai "api_keys".
+            # Membaca hanya salah satunya membuat seluruh kunci hilang tanpa
+            # satu pun pesan — kampusnya tetap ada, tetapi tak seorang pun
+            # dapat masuk.
+            api_keys=[
+                ApiKeyRecord.from_dict(k)
+                for k in (d.get("api_keys") or d.get("keys") or [])
+            ],
             created_at=d.get("created_at") or _now(),
             # Jadwal cacat digagalkan DI SINI, saat berkas dibaca. Kalau
             # ditunda sampai dipakai, kampus itu diam-diam dilayani dengan
@@ -382,3 +396,44 @@ def set_status(tenant_id: str, status: str) -> bool:
     save(tenant)
     logger.info("Status tenant {} → {}", tenant_id, status)
     return True
+
+
+def _naikkan_hak_warisan(scopes: set[str]) -> set[str]:
+    """Kunci yang memegang SELURUH hak versi lama tetap memegang seluruh hak.
+
+    Tanpa penyetaraan ini, memutakhirkan layanan membuat portal kampus yang
+    berjalan baik-baik saja mendadak menerima 403 di seluruh halaman katalog,
+    dan satu-satunya jalan keluar adalah menerbitkan ulang kunci setiap kampus.
+
+    `admin:tenants` TIDAK pernah ikut naik: hak itu harus diminta dengan
+    sengaja, dan mewariskannya kepada kunci yang tidak pernah memintanya
+    berarti memberi kendali seluruh kampus kepada portal biasa.
+    """
+    punya = set(scopes)
+    if punya >= LEGACY_FULL_SCOPES:
+        # DITAMBAHKAN, bukan diganti. Mengganti seluruh daftar akan mencabut
+        # hak yang tidak termasuk penyetaraan ini — termasuk admin:tenants pada
+        # kunci operator, yang kebetulan juga memegang keempat hak lama.
+        return punya | (set(ALL_SCOPES) - {SCOPE_ADMIN})
+    return punya
+
+
+def set_quota(tenant_id: str, **perubahan: int) -> Tenant | None:
+    """Ubah sebagian kuota tenant; medan yang tidak disebut dibiarkan.
+
+    Nilai negatif ditolak, dan nol berarti tanpa batas — bukan "tidak boleh
+    sama sekali", yang akan mematikan kampus secara diam-diam.
+    """
+    sah = {f.name for f in fields(TenantQuota)}
+    asing = set(perubahan) - sah
+    if asing:
+        raise ValueError(f"Field kuota tidak dikenal: {sorted(asing)}")
+    if any(int(v) < 0 for v in perubahan.values()):
+        raise ValueError("Kuota tidak boleh negatif (0 = tanpa batas)")
+
+    tenant = get(tenant_id)
+    if tenant is None:
+        return None
+    tenant.quota = TenantQuota(**{**tenant.quota.as_dict(), **perubahan})
+    save(tenant)
+    return tenant

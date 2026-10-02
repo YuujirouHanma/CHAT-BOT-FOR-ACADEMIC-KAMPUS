@@ -66,12 +66,30 @@ ALL_SCOPES: Final = frozenset({
 
 # Hak untuk kunci "aplikasi mahasiswa": boleh bertanya dan membaca katalog,
 # tidak boleh mengunggah materi apalagi mengelola tenant.
+# Hak bawaan untuk kunci yang diterbitkan tanpa menyebut haknya: seluruhnya
+# KECUALI pengelolaan tenant. Hak admin harus diminta dengan sengaja —
+# memberikannya secara bawaan berarti setiap kunci portal dapat menerbitkan
+# kunci untuk kampus mana pun.
+DEFAULT_KEY_SCOPES: Final = frozenset(ALL_SCOPES - {SCOPE_ADMIN})
+
+
 READER_SCOPES: Final = frozenset({
     SCOPE_CHAT,
     SCOPE_CATALOG_READ,
     SCOPE_CONTENT_READ,
     SCOPE_CONVERSATION_READ,
     SCOPE_CONVERSATION_DELETE,
+})
+
+
+# Hak yang sudah ada SEBELUM katalog, pengelolaan percakapan, dan validasi dosen
+# digabungkan ke layanan ini. Kunci yang memegang keempatnya dianggap memegang
+# seluruh hak versi lama.
+LEGACY_FULL_SCOPES: Final = frozenset({
+    SCOPE_CHAT,
+    SCOPE_CONTENT_READ,
+    SCOPE_CONTENT_WRITE,
+    SCOPE_CONVERSATION_READ,
 })
 
 

@@ -275,7 +275,7 @@ class TestPemilihanGayaLewatRute:
         return r.json()
 
     @pytest.mark.parametrize(
-        "gaya", ["naratif", "visual", "praktik", "ringkas", "sokratik"],
+        "gaya", ["narrative", "visual", "practical", "concise", "socratic"],
     )
     def test_klik_tombol_gaya_melanjutkan_alur(self, klien, gaya: str) -> None:
         from src import learning_styles

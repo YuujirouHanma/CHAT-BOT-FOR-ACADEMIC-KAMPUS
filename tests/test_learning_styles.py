@@ -37,7 +37,7 @@ class TestRegistry:
 
     def test_only_praktik_produces_notebook(self) -> None:
         penghasil = [s.key for s in learning_styles.all_styles() if s.produces_notebook]
-        assert penghasil == ["praktik"]
+        assert penghasil == ["practical"]
 
 
 class TestMatch:
@@ -47,13 +47,13 @@ class TestMatch:
             ("visual", "visual"),
             ("pakai diagram dong", "visual"),
             ("mau lihat bagan", "visual"),
-            ("kasih contoh kode", "praktik"),
-            ("mau notebook", "praktik"),
-            ("ringkas saja", "ringkas"),
-            ("poin-poin", "ringkas"),
-            ("tanya balik saja", "sokratik"),
-            ("jelaskan pelan-pelan", "naratif"),
-            ("pakai analogi", "naratif"),
+            ("kasih contoh kode", "practical"),
+            ("mau notebook", "practical"),
+            ("ringkas saja", "concise"),
+            ("poin-poin", "concise"),
+            ("tanya balik saja", "socratic"),
+            ("jelaskan pelan-pelan", "narrative"),
+            ("pakai analogi", "narrative"),
         ],
     )
     def test_recognises_style_from_free_text(self, teks: str, harap: str) -> None:
@@ -83,7 +83,7 @@ class TestSystemPrompt:
         assert "mermaid" in build_system_prompt(style="visual").lower()
 
     def test_socratic_style_forbids_immediate_answer(self) -> None:
-        p = build_system_prompt(style="sokratik").lower()
+        p = build_system_prompt(style="socratic").lower()
         assert "jangan langsung" in p
 
 
@@ -172,12 +172,12 @@ class TestRegresiNamaMataKuliah:
         ("teks", "harapan"),
         [
             ("pakai diagram dong", "visual"),
-            ("mau lewat kode", "praktik"),
-            ("ringkas aja", "ringkas"),
-            ("jelaskan pelan-pelan", "naratif"),
+            ("mau lewat kode", "practical"),
+            ("ringkas aja", "concise"),
+            ("jelaskan pelan-pelan", "narrative"),
             ("Lewat diagram", "visual"),
-            ("Lewat contoh & kode", "praktik"),
-            ("Poin-poin ringkas", "ringkas"),
+            ("Lewat contoh & kode", "practical"),
+            ("Poin-poin ringkas", "concise"),
         ],
     )
     def test_permintaan_gaya_sungguhan_tetap_dikenali(
@@ -223,5 +223,5 @@ class TestLabelTombolBukanPertanyaan:
     def test_label_dirakit_dari_satu_sumber(self) -> None:
         # Tombol dibuat pipeline dan dikenali di sini; kalau bentuknya dirakit
         # di dua tempat, keduanya bisa menyimpang tanpa ada yang menyadarinya.
-        spec = learning_styles.resolve("ringkas")
+        spec = learning_styles.resolve("concise")
         assert learning_styles.choice_label(spec) == f"{spec.label} — {spec.description}"
