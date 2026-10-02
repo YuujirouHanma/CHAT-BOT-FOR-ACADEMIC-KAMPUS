@@ -21,3 +21,14 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP"]
+
+# Kelima modul ini menyimpan teks prompt di dalam string tiga-kutip. Baris
+# panjangnya adalah ISI yang dibaca model, bukan kode: membungkusnya berarti
+# menyisipkan baris baru ke tengah kalimat prompt yang sudah disetel, dan
+# `# noqa` tidak bisa dipakai karena akan ikut terbaca sebagai teks prompt.
+[tool.ruff.lint.per-file-ignores]
+"src/generation/prompt_templates.py" = ["E501"]
+"src/generation/prompts.py" = ["E501"]
+"src/indexing/concepts.py" = ["E501"]
+"src/indexing/questions.py" = ["E501"]
+"src/indexing/summarizer.py" = ["E501"]

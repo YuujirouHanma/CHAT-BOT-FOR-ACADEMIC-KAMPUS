@@ -14,9 +14,13 @@ from typing import Any
 import pytest
 from unstructured.documents.elements import (
     Image as UImage,
+)
+from unstructured.documents.elements import (
     NarrativeText,
-    Table as UTable,
     Title,
+)
+from unstructured.documents.elements import (
+    Table as UTable,
 )
 
 from src.ingestion.parser import _build_partition_kwargs, parse_document

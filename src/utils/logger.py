@@ -11,6 +11,7 @@ logger: Any
 
 try:
     from loguru import logger
+
     from src.config import settings
 
     logger = cast(Any, logger)
@@ -34,7 +35,9 @@ except ImportError:  # pragma: no cover - fallback when loguru not installed
     logger = cast(Any, logging.getLogger("ragacademic"))
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(
-        logging.Formatter("%(asctime)s | %(levelname)s | %(name)s:%(funcName)s:%(lineno)d - %(message)s")
+        logging.Formatter(
+            "%(asctime)s | %(levelname)s | %(name)s:%(funcName)s:%(lineno)d - %(message)s",
+        )
     )
     if not logger.handlers:
         logger.addHandler(handler)

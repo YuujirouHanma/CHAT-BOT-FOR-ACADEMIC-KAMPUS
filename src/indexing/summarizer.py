@@ -203,7 +203,8 @@ async def enrich_elements(
 
             except Exception as exc:  # pyright: ignore[reportGeneralTypeIssues]
                 logger.error(
-                    f"Summarization failed for {element.element_type.value} {element.element_id}: {exc}"
+                    f"Summarization failed for {element.element_type.value} "
+                    f"{element.element_id}: {exc}"
                 )
                 return element
 
