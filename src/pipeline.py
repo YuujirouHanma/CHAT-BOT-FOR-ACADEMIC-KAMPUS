@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,10 +15,24 @@ from src import gen_cache, guided, learning_styles
 from src import livecode as livecode_mod
 from src.catalog import display_name, resolve_course_week
 from src.config import settings
+from src.generation import prompts as prompts_mod
+from src.generation.exercise import (
+    EXERCISE_SYSTEM_PROMPT,
+    Latihan,
+    build_exercise_prompt,
+    parse_exercise_json,
+)
 from src.generation.llm import LLMGenerator
+from src.generation.prompt_templates import build_guided_user_prompt
 from src.generation.prompts import format_retrieval_results
 from src.hitl.logger import log_interaction, log_quiz_attempt
 from src.indexing.chunker import Chunker
+from src.indexing.concepts import (
+    MAKS_KARAKTER_PER_CHUNK,
+    _susun_materi,
+    ambil_chunk_minggu,
+    pilih_merata,
+)
 from src.indexing.embedder import Embedder
 from src.indexing.summarizer import MultimodalSummarizer, enrich_elements
 from src.ingestion.parser import parse_document
@@ -98,6 +113,25 @@ def _course_name(courses: list[dict], course_id: str) -> str:
         if c.get("course_id") == course_id and c.get("course_name"):
             return c["course_name"]
     return display_name(course_id) or course_id
+
+
+def _kunci_model(penyedia: str | None, nama: str | None) -> str | None:
+    """Satukan (penyedia, nama model) milik portal menjadi satu kunci registry.
+
+    Portal kampus mengirim keduanya terpisah. Registry di sini memakai satu
+    kunci yang penyedianya sudah melekat, sehingga `penyedia` tidak diperlukan
+    untuk memilih model — dibiarkan di tanda tangan agar kontrak API tidak
+    berubah, tetapi tidak ikut menentukan.
+    """
+    return (nama or "").strip() or None
+
+
+# Anggaran materi untuk satu evaluasi. Jauh di atas anggaran satu minggu
+# karena ETS dan EAS memang menguji separuh semester: dengan anggaran
+# sebesar materi satu minggu, soal yang menghubungkan konsep antar minggu
+# mustahil disusun sebab model tidak pernah melihat minggu-minggu itu
+# sekaligus.
+MAKS_KARAKTER_EVALUASI = 24_000
 
 
 class RAGPipeline:
@@ -228,11 +262,16 @@ class RAGPipeline:
         tenant_id = require_tenant_id(tenant_id, operation="query")
         logger.info("=== Query: '{}' (tenant={}, content_id={}, model={}, level={}) ===",
                     question[:80], tenant_id, content_id, model or "default",
-                    level or "standar")
+                    prompts_mod.level_kanonik(level))
         start = time.monotonic()
 
         # Stage 1: decompose the question into an enriched, more searchable query.
-        dq = await self._generator.decompose_query(question, model=model)
+        # Riwayat ikut: tanpa itu pertanyaan lanjutan dicari apa adanya, dan
+        # "jelaskan lebih detail" mengambil halaman yang tidak ada kaitannya
+        # dengan yang sedang dibahas.
+        dq = await self._generator.decompose_query(
+            question, model=model, history=history,
+        )
         enriched_query = dq.get("query_diperkaya") or question
 
         # Stage 2: retrieve using the enriched query.
@@ -257,6 +296,7 @@ class RAGPipeline:
         context = format_retrieval_results(results)
         answer = await self._generator.generate(
             question, context, model=model, level=level, style=style,
+            history=history,
         )
 
         sources = [
@@ -753,7 +793,7 @@ class RAGPipeline:
         statis melewatkan pemeriksaan yang tidak diminta, dan tinjauan kode
         tetap berjalan dengan berbekal perintah soal.
         """
-        latihan = livecode_mod.exercise_from_item(item, index=index)
+        latihan = livecode_mod.exercise_from_item(item)
         kode = answer if isinstance(answer, str) else ""
         nilai = await self._review_code(latihan, kode, model=model)
         return evaluation_mod.GradedItem(
@@ -795,13 +835,20 @@ class RAGPipeline:
         butir = await self.evaluation(
             course_id, plan, tenant_id=tenant_id, model=model,
         )
-        return [
+        latihan = [
             livecode_mod.exercise_from_item(
-                b, course_id=course_id, week=plan.weeks_covered[-1], index=i,
+                b, course_id=course_id, week=plan.weeks_covered[-1],
             )
-            for i, b in enumerate(butir)
+            for b in butir
             if b.get("type") == "koding"
         ]
+        # Definisinya disimpan supaya pengiriman kode nanti tidak perlu menyusun
+        # ulang daftar ini. Tanpa itu, `submit` harus menebak `count` yang sama
+        # dengan yang dipakai saat mendaftar — dan menebak salah berarti latihan
+        # yang sedang dikerjakan mahasiswa mendadak "tidak ditemukan".
+        for e in latihan:
+            livecode_mod.save_exercise(e, tenant_id=tenant_id)
+        return latihan
 
     async def grade_livecode(
         self,
@@ -932,3 +979,423 @@ class RAGPipeline:
             "attempt_id": attempt_id,
             "results": results,
         }
+
+    # --- Guided Learning -----------------------------------------------
+    # Dipindahkan apa adanya dari layanan tim back-end. Ditulis ulang dengan
+    # tangan berisiko melahirkan perilaku yang berbeda tipis dari yang sudah
+    # tayang, dan perbedaan semacam itu paling sulit ditemukan justru karena
+    # keduanya sama-sama tampak benar.
+
+    @staticmethod
+    def _build_sources(results: list[dict]) -> list[dict]:
+        """Ubah hasil retrieval jadi daftar sumber yang dipahami frontend."""
+        return [
+            {
+                "index": idx + 1,
+                "source_file": (r.get("payload") or {}).get("source_file"),
+                "page_number": (r.get("payload") or {}).get("page_number"),
+                "element_type": (r.get("payload") or {}).get("element_type"),
+                "content_id": (r.get("payload") or {}).get("content_id"),
+                "rerank_score": r.get("rerank_score"),
+            }
+            for idx, r in enumerate(results)
+        ]
+
+    @staticmethod
+    def _pesan_tanpa_materi(topic: str, section_ids: Sequence[int] | None) -> str:
+        """Bedakan sebabnya: kalau mahasiswa mempersempit ke beberapa minggu,
+        penyebab paling mungkin topiknya ada di minggu lain — saran "coba topik
+        lain" akan menyesatkan."""
+        if section_ids:
+            return (
+                f"Tidak ada materi tentang '{topic}' di minggu yang sedang kamu "
+                "aktifkan. Coba aktifkan minggu lain di panel Minggu Aktif, "
+                "atau ganti topiknya."
+            )
+        return (
+            f"Materi yang tersedia tidak mencakup informasi tentang '{topic}'. "
+            "Coba pertanyaan dengan topik yang berbeda atau periksa apakah "
+            "materi minggu ini sudah diindeks."
+        )
+
+    async def guided_query_stream(
+        self,
+        topic: str,
+        template_id: str,
+        class_name: str,
+        guided_system_prompt: str,
+        content_id: str | None = None,
+        session_id: str | None = None,
+        section_ids: Sequence[int] | None = None,
+        history: list[dict] | None = None,
+        student_name: str | None = None,
+        user_id: int | None = None,
+        *,
+        tenant_id: str,
+    ) -> AsyncIterator[dict]:
+        """Versi guided_query yang mengalirkan hasilnya sambil dibuat.
+
+        Menghasilkan kamus peristiwa, bukan satu QueryResult:
+
+        ``{"type": "sources", ...}``
+            Segera setelah retrieval. Mahasiswa melihat sumbernya lebih dulu,
+            sebelum satu kata jawaban pun ada.
+        ``{"type": "delta", "text": ...}``
+            Potongan jawaban, berkali-kali.
+        ``{"type": "done", ...}``
+            Jawaban utuh, rekomendasi, dan interaction_id untuk /chat/feedback.
+
+        Total waktunya sama dengan guided_query. Yang berubah hanya kapan
+        mahasiswa melihat tanda kehidupan pertama: dari ~12 detik menjadi ~3
+        detik, yaitu setelah retrieval selesai.
+
+        Rekomendasi tetap dihitung bersamaan dengan jawaban seperti di jalur
+        non-streaming, lalu ditunggu di akhir — kalau dijalankan berurutan,
+        streaming justru menambah total waktu alih-alih menguranginya.
+        """
+        import asyncio as _asyncio
+
+        tenant_id = require_tenant_id(tenant_id, operation="guided_query_stream")
+        start = time.monotonic()
+        logger.info(
+            "=== Guided stream: template={} topic='{}' (tenant={} content_id={}) ===",
+            template_id, topic[:60], tenant_id, content_id,
+        )
+
+        dq: dict = {"query_diperkaya": topic, "topik_utama": topic, "konsep_kunci": []}
+
+        results = await self._retriever.retrieve(
+            query=topic, content_id=content_id, source_filter=None,
+            # section_ids adalah nama minggu versi portal; di sini `weeks`.
+            weeks=list(section_ids) if section_ids else None,
+            tenant_id=tenant_id,
+        )
+
+        if not results:
+            pesan = self._pesan_tanpa_materi(topic, section_ids)
+            yield {"type": "sources", "sources": []}
+            yield {"type": "delta", "text": pesan}
+            yield {
+                "type": "done",
+                "answer": pesan,
+                "recommendations": [],
+                "interaction_id": log_interaction(
+                    question=topic, dq=dq, answer=pesan, sources=[],
+                    recommendations=[], elapsed_seconds=time.monotonic() - start,
+                    content_id=content_id, session_id=session_id, student_name=student_name,
+                    user_id=user_id, tenant_id=tenant_id,
+                ),
+            }
+            return
+
+        context = format_retrieval_results(results)
+        yield {"type": "sources", "sources": self._build_sources(results)}
+
+        guided_user_prompt = build_guided_user_prompt(
+            template_id=template_id, topic=topic, class_name=class_name,
+            context_block=context.text_block,
+        )
+
+        tugas_rekomendasi = _asyncio.create_task(
+            self._generator.generate_followup(topic, dq, "")
+        )
+
+        bagian: list[str] = []
+        async for potongan in self._generator.stream_with_custom_prompt(
+            system_prompt=guided_system_prompt,
+            user_prompt=guided_user_prompt,
+            context=context,
+            history=history,
+        ):
+            bagian.append(potongan)
+            yield {"type": "delta", "text": potongan}
+
+        jawaban = "".join(bagian)
+
+        try:
+            rekomendasi = await tugas_rekomendasi
+        except Exception as exc:  # noqa: BLE001 - rekomendasi bukan alasan menggagalkan jawaban
+            logger.warning("Rekomendasi gagal dibuat: {}", exc)
+            rekomendasi = []
+
+        logger.info(
+            "TIMING guided_stream | total={:.1f}s | template={} panjang_jawaban={}",
+            time.monotonic() - start, template_id, len(jawaban),
+        )
+
+        yield {
+            "type": "done",
+            "answer": jawaban,
+            "recommendations": rekomendasi,
+            "interaction_id": log_interaction(
+                question=topic, dq=dq, answer=jawaban,
+                sources=self._build_sources(results), recommendations=rekomendasi,
+                elapsed_seconds=time.monotonic() - start,
+                content_id=content_id, session_id=session_id, student_name=student_name,
+                user_id=user_id, tenant_id=tenant_id,
+            ),
+        }
+
+    async def guided_query(
+        self,
+        topic: str,
+        template_id: str,
+        class_name: str,
+        guided_system_prompt: str,
+        content_id: str | None = None,
+        session_id: str | None = None,
+        section_ids: Sequence[int] | None = None,
+        history: list[dict] | None = None,
+        model_provider: str | None = None,
+        model_name: str | None = None,
+        student_name: str | None = None,
+        user_id: int | None = None,
+        *,
+        tenant_id: str,
+    ) -> QueryResult:
+        """Run a RAG query with a fully personalized system prompt.
+
+        Unlike ``query()``, this method:
+        - Skips decompose_query (topic is already the search term)
+        - Builds the user prompt via the selected template from TEMPLATE_REGISTRY
+        - Injects *guided_system_prompt* instead of the default SYSTEM_PROMPT
+        - Runs generate + generate_followup in parallel for speed
+
+        Args:
+            topic: The specific topic/concept the student wants to explore.
+            template_id: ID from TEMPLATE_REGISTRY (e.g. 'understand_concept').
+            class_name: Display name of the course for prompt formatting.
+            guided_system_prompt: Fully built, personalized system prompt.
+            content_id: Qdrant content filter (e.g. 'class-3').
+            session_id: For session continuity.
+            section_ids: Minggu yang diaktifkan mahasiswa; kosong berarti
+                seluruh kelas.
+
+        Returns:
+            QueryResult with personalized answer.
+        """
+        import asyncio as _asyncio
+        tenant_id = require_tenant_id(tenant_id, operation="guided_query")
+        logger.info(
+            "=== Guided query: template={} topic='{}' (tenant={} content_id={}) ===",
+            template_id, topic[:60], tenant_id, content_id,
+        )
+        start = time.monotonic()
+
+        # Skip decompose — the topic IS the search query (saves 1 LLM call)
+        dq: dict = {"query_diperkaya": topic, "topik_utama": topic, "konsep_kunci": []}
+
+        # Stage 1: retrieve directly with topic.
+        t_stage = time.monotonic()
+        results = await self._retriever.retrieve(
+            query=topic, content_id=content_id, source_filter=None,
+            # section_ids adalah nama minggu versi portal; di sini `weeks`.
+            weeks=list(section_ids) if section_ids else None,
+            tenant_id=tenant_id,
+        )
+        t_retrieve = time.monotonic() - t_stage
+        if not results:
+            # Bedakan sebabnya: kalau mahasiswa mempersempit ke beberapa minggu,
+            # penyebab paling mungkin adalah topiknya ada di minggu lain — saran
+            # "coba topik lain" akan menyesatkan.
+            if section_ids:
+                pesan_kosong = (
+                    f"Tidak ada materi tentang '{topic}' di minggu yang sedang kamu "
+                    "aktifkan. Coba aktifkan minggu lain di panel Minggu Aktif, "
+                    "atau ganti topiknya."
+                )
+            else:
+                pesan_kosong = (
+                    f"Materi yang tersedia tidak mencakup informasi tentang '{topic}'. "
+                    "Coba pertanyaan dengan topik yang berbeda atau periksa apakah "
+                    "materi minggu ini sudah diindeks."
+                )
+            result = QueryResult(
+                answer=pesan_kosong,
+                sources=[],
+                recommendations=[],
+                decomposition=dq,
+            )
+            result.interaction_id = log_interaction(
+                question=topic, dq=dq, answer=result.answer, sources=[],
+                recommendations=[], elapsed_seconds=time.monotonic() - start,
+                content_id=content_id, session_id=session_id, student_name=student_name,
+                user_id=user_id, tenant_id=tenant_id,
+            )
+            return result
+
+        # Stage 2: format context from retrieved chunks.
+        context = format_retrieval_results(results)
+
+        # Stage 3: build guided user prompt from template.
+        guided_user_prompt = build_guided_user_prompt(
+            template_id=template_id,
+            topic=topic,
+            class_name=class_name,
+            context_block=context.text_block,
+        )
+
+        # Stage 4 & 5 in parallel: generate answer + follow-up simultaneously.
+        # Keduanya diukur terpisah: karena berjalan bersamaan, tanpa ini kita
+        # hanya tahu totalnya dan tidak bisa tahu panggilan mana yang menggantung.
+        async def _timed(label: str, coro):
+            t = time.monotonic()
+            try:
+                return await coro
+            finally:
+                logger.info("TIMING {} | {:.1f}s", label, time.monotonic() - t)
+
+        t_stage = time.monotonic()
+        answer, recommendations = await _asyncio.gather(
+            _timed("generate_answer", self._generator.generate_with_custom_prompt(
+                system_prompt=guided_system_prompt,
+                user_prompt=guided_user_prompt,
+                context=context,
+                model=_kunci_model(model_provider, model_name),
+                history=history,
+            )),
+            _timed(
+                "generate_followup",
+                self._generator.generate_followup(
+                    topic,
+                    dq,
+                    "",
+                    model=_kunci_model(model_provider, model_name),
+                ),
+            ),
+        )
+        t_generate = time.monotonic() - t_stage
+
+        logger.info(
+            "TIMING guided_query | retrieve={:.1f}s generate={:.1f}s total={:.1f}s "
+            "| template={} panjang_jawaban={}",
+            t_retrieve, t_generate, time.monotonic() - start,
+            template_id, len(answer),
+        )
+
+        sources = self._build_sources(results)
+
+        interaction_id = log_interaction(
+            question=topic, dq=dq, answer=answer, sources=sources,
+            recommendations=recommendations, elapsed_seconds=time.monotonic() - start,
+            content_id=content_id, session_id=session_id, student_name=student_name,
+            user_id=user_id, tenant_id=tenant_id,
+        )
+        return QueryResult(
+            answer=answer, sources=sources, recommendations=recommendations,
+            interaction_id=interaction_id, decomposition=dq,
+        )
+
+    async def generate_exercise(
+        self,
+        topic: str,
+        class_name: str,
+        content_id: str | None = None,
+        section_ids: Sequence[int] | None = None,
+        *,
+        tenant_id: str,
+    ) -> tuple[Latihan | None, list[dict], str | None]:
+        """Buat latihan praktik dari materi yang relevan dengan *topic*.
+
+        Dipisahkan dari guided_query karena keluarannya berkas yang diunduh,
+        bukan jawaban chat, dan karena pembuatannya jauh lebih lama sehingga
+        frontend memberinya indikator progres sendiri.
+
+        Returns:
+            (Latihan, sumber, alasan_gagal). ``alasan_gagal`` bernilai
+            'tanpa_materi' atau 'keluaran_tidak_terbaca' saat Latihan None —
+            dibedakan karena keduanya menuntut tindakan berbeda dari mahasiswa,
+            dan pesan yang salah membuat orang mengejar masalah yang keliru.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="generate_exercise")
+        start = time.monotonic()
+        logger.info(
+            "=== Buat latihan: topik='{}' (tenant={} content_id={}) ===",
+            topic[:60], tenant_id, content_id,
+        )
+
+        results = await self._retriever.retrieve(
+            query=topic, content_id=content_id, source_filter=None,
+            # section_ids adalah nama minggu versi portal; di sini `weeks`.
+            weeks=list(section_ids) if section_ids else None,
+            tenant_id=tenant_id,
+        )
+        if not results:
+            logger.warning("Latihan dibatalkan: materi untuk topik ini tidak ditemukan")
+            return None, [], "tanpa_materi"
+
+        context = format_retrieval_results(results)
+        user_prompt = build_exercise_prompt(topic, class_name, context.text_block)
+
+        # Satu kali ulang saat keluaran tidak terbaca. Terpantau model sesekali
+        # membungkus JSON dengan prosa atau memotongnya; mengulang jauh lebih baik
+        # daripada memberi mahasiswa galat setelah menunggu setengah menit.
+        latihan = None
+        for percobaan in (1, 2):
+            t_gen = time.monotonic()
+            raw = await self._generator.generate_with_custom_prompt(
+                system_prompt=EXERCISE_SYSTEM_PROMPT,
+                user_prompt=(
+                    user_prompt if percobaan == 1
+                    else user_prompt + "\n\nPENTING: balas HANYA objek JSON, tanpa teks lain."
+                ),
+                context=context,
+            )
+            logger.info(
+                "TIMING exercise_generate | percobaan={} {:.1f}s",
+                percobaan, time.monotonic() - t_gen,
+            )
+            latihan = parse_exercise_json(raw, topic)
+            if latihan is not None:
+                break
+            logger.warning("Keluaran latihan tidak terbaca pada percobaan {}", percobaan)
+
+        sources = [
+            {
+                "index": idx + 1,
+                "source_file": (r.get("payload") or {}).get("source_file"),
+                "page_number": (r.get("payload") or {}).get("page_number"),
+            }
+            for idx, r in enumerate(results)
+        ]
+
+        logger.info(
+            "TIMING generate_exercise | total={:.1f}s | format={} tugas={}",
+            time.monotonic() - start,
+            latihan.format if latihan else "GAGAL",
+            len(latihan.tugas) if latihan else 0,
+        )
+        return latihan, sources, None if latihan else "keluaran_tidak_terbaca"
+
+    async def _materi_rentang_minggu(
+        self, content_id: str, weeks: Sequence[int], *, tenant_id: str,
+    ) -> str:
+        """Teks materi beberapa minggu sekaligus, terurut seperti diajarkan.
+
+        Memakai `ambil_chunk_minggu` milik peta konsep, bukan perakit teks
+        sendiri. Sudah ada satu perakit di repo ini yang menangani pengurutan
+        (berkas → halaman → indeks potongan) dan penanda sumber; menambah yang
+        kedua berarti dua tempat yang harus ikut diperbaiki setiap kali cara
+        materi dirakit berubah, dan yang satu pasti tertinggal.
+
+        Minggunya diambil satu per satu lalu disambung berurutan — bukan satu
+        panggilan dengan seluruh section sekaligus — supaya minggu 3 selalu
+        mendahului minggu 5. Tanpa itu potongan antar minggu berselang-seling,
+        dan begitu dipangkas anggaran karakter yang sampai ke model adalah
+        cuplikan acak, bukan materi yang runtut.
+        """
+        semua: list[dict] = []
+        for minggu in weeks:
+            semua.extend(
+                await ambil_chunk_minggu(
+                    self._store, content_id, minggu, tenant_id=tenant_id,
+                )
+            )
+        if not semua:
+            return ""
+
+        # Anggaran potongan diturunkan dari anggaran karakter, bukan ditulis
+        # terpisah, supaya keduanya tidak bisa berselisih. `+ 40` adalah baris
+        # penanda "[n] (berkas, hal. N)" yang ditambahkan perakit tiap potongan.
+        maks_chunk = max(8, MAKS_KARAKTER_EVALUASI // (MAKS_KARAKTER_PER_CHUNK + 40))
+        return _susun_materi(pilih_merata(semua, maks_chunk))[:MAKS_KARAKTER_EVALUASI]

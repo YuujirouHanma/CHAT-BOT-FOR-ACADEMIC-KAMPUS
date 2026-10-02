@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from src.schemas import ElementType
+from src.utils.logger import logger
 
 SYSTEM_PROMPT = """Anda adalah asisten pembelajaran untuk mahasiswa. Tugas Anda:
 
@@ -26,28 +27,85 @@ SYSTEM_PROMPT = """Anda adalah asisten pembelajaran untuk mahasiswa. Tugas Anda:
 6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat."""
 
 
-# Level gaya jawaban — ditambahkan ke SYSTEM_PROMPT. Untuk mahasiswa pelosok yang
-# bingung, "sederhana" menjelaskan seperti ke pemula; "detail" untuk yang mau mendalam.
+# Kedalaman jawaban — ditambahkan ke SYSTEM_PROMPT.
+#
+# SATU-SATUNYA tabel kedalaman di seluruh sistem. Dulu ada dua: tabel ini dengan
+# nama Indonesia dan EXPLANATION_DEPTH_MODIFIERS dengan nama Inggris, untuk
+# tingkat yang sama persis. Mahasiswa bisa mendapat kedalaman berbeda hanya
+# karena masuk lewat Guided Learning atau lewat tanya-jawab biasa.
+#
+# Namanya kini Inggris karena itu yang dipakai portal kampus pada tombolnya, dan
+# tingkat "standar" dihapus karena permintaannya sama dengan "sederhana" —
+# keduanya kini bermuara ke `simple`.
 ANSWER_LEVEL_INSTRUCTIONS = {
-    "sederhana": (
-        "\n\nGAYA JAWABAN: Jelaskan dengan bahasa SANGAT SEDERHANA, seolah menjelaskan "
-        "ke siswa SMA atau orang yang baru pertama belajar. Hindari istilah teknis; jika "
-        "terpaksa memakainya, jelaskan artinya dengan kata sehari-hari. Pakai kalimat "
-        "pendek dan analogi yang mudah dibayangkan. Tetap sertakan [Sumber N]."
+    "simple": (
+        "\n\nKEDALAMAN JAWABAN: Jelaskan dengan bahasa SANGAT SEDERHANA, seolah "
+        "menjelaskan ke siswa SMA atau orang yang baru pertama belajar. Hindari "
+        "istilah teknis; jika terpaksa memakainya, jelaskan artinya dengan kata "
+        "sehari-hari. Pakai kalimat pendek dan analogi yang mudah dibayangkan. "
+        "Cukup 2-3 paragraf singkat. Tetap sertakan [Sumber N]."
     ),
-    "standar": "",
-    "detail": (
-        "\n\nGAYA JAWABAN: Jelaskan secara MENDALAM untuk mahasiswa tingkat lanjut. "
-        "Sertakan detail penting, istilah teknis yang tepat beserta nuansanya, dan bila "
-        "relevan tunjukkan keterkaitan antar konsep. Tetap sertakan [Sumber N]."
+    "detailed": (
+        "\n\nKEDALAMAN JAWABAN: Jelaskan secara MENDALAM untuk mahasiswa tingkat "
+        "lanjut. Sertakan detail penting, istilah teknis yang tepat beserta "
+        "nuansanya, contoh, dan bila relevan tunjukkan keterkaitan antar konsep. "
+        "Target 4-6 paragraf. Tetap sertakan [Sumber N]."
+    ),
+    "academic": (
+        "\n\nKEDALAMAN JAWABAN: Gunakan bahasa akademis yang formal dan presisi. "
+        "Sertakan terminologi domain, rujukan ke konsep terkait, dan analisis "
+        "mendalam. Boleh panjang bila memang diperlukan. Tetap sertakan "
+        "[Sumber N]."
     ),
 }
+
+# Label singkat untuk ditampilkan ke mahasiswa, mis. "Untuk Budi (penjelasan
+# detail)". Ditaruh di sini, bukan di rute, supaya nama tingkat dan teks yang
+# dibaca mahasiswa tidak pernah berbeda versi.
+LABEL_KEDALAMAN = {
+    "simple": "penjelasan ringkas",
+    "detailed": "penjelasan detail",
+    "academic": "penjelasan akademis",
+}
+
+
+def label_kedalaman(nilai: str | None) -> str:
+    """Teks kedalaman yang ditampilkan ke mahasiswa."""
+    return LABEL_KEDALAMAN[level_kanonik(nilai)]
+
+
+# Bawaan mengikuti portal yang sudah tayang. Dipilih eksplisit, bukan dibiarkan
+# kosong: tanpa instruksi apa pun, panjang jawaban sepenuhnya diputuskan model
+# dan berubah-ubah antar pertanyaan.
+KEDALAMAN_BAWAAN = "detailed"
+
+# Nama lama yang mungkin masih tersimpan di sesi atau profil mahasiswa. Tidak
+# diiklankan di API, hanya dikenali supaya data lama tidak jatuh ke string
+# kosong tanpa pesan.
+ALIAS_KEDALAMAN = {
+    "sederhana": "simple",
+    "standar": "simple",
+    "detail": "detailed",
+    "akademis": "academic",
+}
+
+
+def level_kanonik(nilai: str | None) -> str:
+    """Satukan nama lama dan nama Inggris menjadi satu kunci."""
+    n = (nilai or KEDALAMAN_BAWAAN).strip().lower()
+    n = ALIAS_KEDALAMAN.get(n, n)
+    return n if n in ANSWER_LEVEL_INSTRUCTIONS else KEDALAMAN_BAWAAN
+
+
+def instruksi_kedalaman(nilai: str | None) -> str:
+    """Instruksi kedalaman untuk sebuah level."""
+    return ANSWER_LEVEL_INSTRUCTIONS[level_kanonik(nilai)]
 
 
 def build_system_prompt(level: str | None = None, style: str | None = None) -> str:
     """SYSTEM_PROMPT + gaya belajar (CARA menjawab) + level (KEDALAMAN).
 
-    Keduanya sengaja terpisah dan bisa digabung: "visual" + "sederhana" berarti
+    Keduanya sengaja terpisah dan bisa digabung: "visual" + "simple" berarti
     diagram dengan bahasa yang mudah. Level tidak dikenal → prompt standar; gaya
     tidak dikenal → tanpa tambahan gaya sama sekali.
     """
@@ -57,7 +115,7 @@ def build_system_prompt(level: str | None = None, style: str | None = None) -> s
     spec = learning_styles.get(style)
     if spec:
         prompt += spec.system_suffix
-    return prompt + ANSWER_LEVEL_INSTRUCTIONS.get(level or "standar", "")
+    return prompt + instruksi_kedalaman(level)
 
 
 USER_PROMPT_TEMPLATE = """KONTEKS MATERI:
@@ -79,6 +137,14 @@ DECOMPOSE_SYSTEM_PROMPT = (
     '  "tipe_pertanyaan": "<definisi | penjelasan | contoh | perhitungan | perbandingan | lainnya>",\n'
     '  "query_diperkaya": "<versi pertanyaan yang lebih eksplisit dan informatif untuk pencarian materi>"\n'
     "}\n"
+    # Pertanyaan lanjutan hampir tidak pernah lengkap: "jelaskan lebih detail",
+    # "kenapa begitu", "contohnya apa". Yang dipakai mencari materi adalah
+    # `query_diperkaya`, jadi di situlah rujukannya harus sudah terurai menjadi
+    # kata benda. Tanpa aturan ini, pencarian berjalan atas kata "lebih detail"
+    # dan mengembalikan halaman yang sama sekali lain.
+    "Bila ada [RIWAYAT PERCAKAPAN], pertanyaannya mungkin merujuk ke sana lewat "
+    "kata ganti atau kalimat pendek. Ganti setiap rujukan itu dengan istilah "
+    "sebenarnya, sehingga query_diperkaya dapat dipahami TANPA membaca riwayat.\n"
     "Jawab HANYA dengan JSON valid. Jangan coba menjawab pertanyaannya."
 )
 
@@ -286,6 +352,12 @@ def parse_quiz_json(raw: str) -> list[dict[str, Any]]:
 
     Keeps only well-formed items: non-empty question, exactly 4 string options,
     and an answer_index within range. Returns [] if nothing valid is found.
+
+    Butir yang dibuang DICATAT, tidak dibuang diam-diam. Tanpa catatan itu,
+    kuis yang seharusnya 5 soal tersaji 2 soal dan tidak ada apa pun di log yang
+    menjelaskan kenapa — persis keadaan yang membuat keluaran terpotong
+    (`max_tokens` kehabisan di tengah JSON) tak terbedakan dari materi yang
+    memang tipis.
     """
     clean = raw.replace("```json", "").replace("```", "").strip()
     data: Any = None
@@ -299,18 +371,32 @@ def parse_quiz_json(raw: str) -> list[dict[str, Any]]:
             except Exception:
                 data = None
     if not isinstance(data, list):
+        logger.warning(
+            "Kuis gagal diurai: keluaran model bukan senarai JSON "
+            "({} aksara, diawali {!r})",
+            len(clean), clean[:120],
+        )
         return []
 
     quiz: list[dict[str, Any]] = []
+    dibuang: list[str] = []
     for item in data:
         if not isinstance(item, dict):
+            dibuang.append("bukan objek")
             continue
         question = str(item.get("question", "")).strip()
         options = item.get("options")
         answer_index = item.get("answer_index")
-        if not question or not isinstance(options, list) or len(options) != 4:
+        if not question:
+            dibuang.append("pertanyaan kosong")
+            continue
+        if not isinstance(options, list) or len(options) != 4:
+            dibuang.append(
+                f"pilihan {len(options) if isinstance(options, list) else 'bukan senarai'}"
+            )
             continue
         if not isinstance(answer_index, int) or not (0 <= answer_index < 4):
+            dibuang.append(f"kunci {answer_index!r} di luar jangkauan")
             continue
         quiz.append({
             "question": question,
@@ -318,6 +404,12 @@ def parse_quiz_json(raw: str) -> list[dict[str, Any]]:
             "answer_index": answer_index,
             "explanation": str(item.get("explanation", "")).strip(),
         })
+
+    if dibuang:
+        logger.warning(
+            "Kuis: {} dari {} butir dibuang karena bentuknya tidak sah ({})",
+            len(dibuang), len(data), "; ".join(dibuang[:5]),
+        )
     return quiz
 
 # --- Evaluasi berkala (kuis / ETS / EAS) atas rentang minggu -------------------
@@ -338,6 +430,7 @@ _EVAL_SHAPES: dict[str, str] = {
         '"explanation":"..."}',
     "koding":
         '{"type":"koding","question":"perintah membuat program","starter_code":"",'
+        '"language":"bahasa yang dipakai, mis. python / sql / java",'
         '"expected_behavior":"apa yang harus dilakukan program",'
         '"rubric":["benar secara logika","sesuai perintah"],"explanation":"..."}',
 }
@@ -463,6 +556,12 @@ def parse_evaluation_json(raw: str) -> list[dict[str, Any]]:
             )
         elif tipe == "koding":
             butir["starter_code"] = str(item.get("starter_code", ""))
+            # Bahasa ikut dibawa: ia menentukan apakah kiriman mahasiswa diurai
+            # sebagai Python atau langsung diserahkan ke tinjauan LLM. Tanpa
+            # baris ini jawaban model dibuang di sini, nilainya jatuh ke bawaan
+            # "python", dan setiap jawaban SQL yang benar dibalas
+            # "invalid syntax".
+            butir["language"] = str(item.get("language", "")).strip()
             butir["expected_behavior"] = str(item.get("expected_behavior", "")).strip()
             rubrik = item.get("rubric")
             butir["rubric"] = (
@@ -606,3 +705,68 @@ def parse_code_review_json(raw: str) -> dict[str, Any] | None:
         "keliru": keliru,
         "petunjuk": _daftar_teks(data.get("petunjuk")),
     }
+
+# --- Membaca JSON dari keluaran model ---------------------------------------
+# Model kerap membungkus JSON-nya dalam pagar kode, menambah kalimat
+# pembuka, atau mengembalikan satu objek saat diminta senarai. Keempat
+# pembantu ini menanganinya di satu tempat, bukan diulang di tiap pemanggil
+# dengan aturan yang sedikit berbeda.
+
+
+def _tanpa_pagar(raw: str) -> str:
+    return (raw or "").replace("```json", "").replace("```", "").strip()
+
+
+def extract_json_object(raw: str) -> dict[str, Any] | None:
+    """Objek JSON pertama di dalam keluaran model; None bila tidak terbaca.
+
+    None sengaja dibedakan dari objek kosong: pemanggil penilaian memakainya
+    sebagai tanda "mesin gagal menilai" lalu meneruskan butirnya ke dosen,
+    bukan memberinya nilai nol. Kegagalan mesin bukan kesalahan mahasiswa.
+    """
+    bersih = _tanpa_pagar(raw)
+    kandidat = [bersih]
+    cocok = re.search(r"\{[\s\S]*\}", bersih)
+    if cocok:
+        kandidat.append(cocok.group(0))
+
+    for teks in kandidat:
+        try:
+            data = json.loads(teks)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def extract_json_array(raw: str) -> list[Any]:
+    """Array JSON pertama di dalam keluaran model; daftar kosong bila gagal.
+
+    Dicoba dua kali: seluruh teks lebih dulu (kasus lazim), lalu potongan di
+    antara kurung siku terluar (kasus model menambahkan kalimat pengantar).
+    """
+    bersih = _tanpa_pagar(raw)
+    kandidat = [bersih]
+    cocok = re.search(r"\[[\s\S]*\]", bersih)
+    if cocok:
+        kandidat.append(cocok.group(0))
+
+    for teks in kandidat:
+        try:
+            data = json.loads(teks)
+        except Exception:
+            continue
+        if isinstance(data, list):
+            return data
+    return []
+
+
+def parse_json_dicts(raw: str) -> list[dict[str, Any]]:
+    """Array JSON yang hanya menyisakan objeknya.
+
+    Butir yang bukan objek DIBUANG, bukan dipaksa menjadi objek kosong: yang
+    hilang bentuknya tidak dapat ditebak, dan menebaknya berarti memberi
+    mahasiswa soal yang tidak pernah benar-benar disusun.
+    """
+    return [d for d in extract_json_array(raw) if isinstance(d, dict)]

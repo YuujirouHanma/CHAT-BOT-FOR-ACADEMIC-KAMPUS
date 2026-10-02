@@ -6,6 +6,7 @@ GENERATION_PROVIDER + GENERATION_MODEL + GENERATION_BASE_URL in .env.
 """
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from typing import Any
 
 from openai import APIConnectionError as OAIConnError
@@ -22,6 +23,7 @@ from tenacity import (
 
 from src import model_registry
 from src.config import MAX_GENERATION_TOKENS, settings
+from src.generation.bahasa import bersihkan_jawaban, buang_cjk, catat_kebocoran
 from src.generation.prompts import (
     CODE_REVIEW_SYSTEM_PROMPT,
     DECOMPOSE_SYSTEM_PROMPT,
@@ -64,7 +66,14 @@ _AUX_MAX_TOKENS = 3072
 # token) DITAMBAH token penalaran. Dengan batas lama 1800, penalaran menghabiskan
 # jatah sebelum JSON-nya sempat ditulis sehingga model mengembalikan konten kosong
 # dan pembuatan kuis selalu gagal pada model reasoning.
-_QUIZ_MAX_TOKENS = 4096
+#
+# Dinaikkan dari 4.096 setelah uji manual: pada materi padat, JSON-nya terpotong
+# di tengah butir ketiga, dan kuis lima soal tersaji dua soal. Potongan itu TIDAK
+# membuat panggilan gagal — senarai yang pecah tetap terurai sebagian — sehingga
+# satu-satunya gejalanya adalah kuis yang pendek tanpa sebab. Disamakan dengan
+# batas evaluasi, yang keluarannya memang sejenis. Batas atas, bukan target:
+# token yang tidak terpakai tidak ditagih.
+_QUIZ_MAX_TOKENS = 8192
 _EVAL_MAX_TOKENS = 8192
 # Penilaian & tinjauan kode. Terukur pada Qwen 3.7: satu tinjauan kode memakai
 # ~2.900 token hanya untuk penalaran sebelum menulis JSON-nya. Dengan batas
@@ -192,6 +201,53 @@ class TruncatedGenerationError(GenerationError):
     """
 
 
+# --- Kendali reasoning dan riwayat percakapan -------------------------------
+# Token berpikir dan token jawaban berbagi jatah `max_tokens` yang sama. Tanpa
+# plafon terpisah, model bisa menghabiskan SELURUH jatah untuk berpikir lalu
+# mengembalikan isi kosong dengan finish_reason='length' — dan panggilan itu
+# tetap terbayar penuh.
+NO_REASONING_BODY: dict[str, Any] = {"reasoning": {"enabled": False}}
+
+
+def _reasoning_body() -> dict[str, Any]:
+    """Batasi token berpikir supaya selalu ada sisa untuk jawabannya."""
+    return {"reasoning": {"max_tokens": settings.reasoning_max_tokens}}
+
+
+# Berapa banyak giliran sebelumnya yang ikut dikirim. Sesi menyimpan jauh lebih
+# banyak; mengirim semuanya membuat prompt tumbuh tiap giliran dan ongkosnya
+# naik terus sepanjang percakapan. Enam pesan (tiga tanya-jawab) cukup untuk
+# menguraikan rujukan seperti "yang tadi", yang memang hampir selalu menunjuk
+# satu-dua giliran terakhir.
+MAX_HISTORY_MESSAGES = 6
+
+# Jawaban sebelumnya bisa sangat panjang. Yang dibutuhkan hanya cukup konteks
+# untuk tahu apa yang sedang dibicarakan, bukan mengulang seluruh isinya.
+MAX_HISTORY_CHARS = 600
+
+
+def trim_history(history: list[dict] | None) -> list[dict]:
+    """Beberapa giliran terakhir, dipotong, siap dipakai sebagai messages.
+
+    Isi pesan dinormalkan jadi teks biasa: riwayat bisa memuat blok multimodal
+    dari giliran bergambar, dan mengirim ulang gambar lama pada setiap giliran
+    berikutnya mahal tanpa menambah pemahaman.
+    """
+    if not history:
+        return []
+
+    dipangkas: list[dict] = []
+    for pesan in history[-MAX_HISTORY_MESSAGES:]:
+        peran = pesan.get("role")
+        isi = pesan.get("content")
+        if peran not in ("user", "assistant") or not isinstance(isi, str):
+            continue
+        if len(isi) > MAX_HISTORY_CHARS:
+            isi = isi[:MAX_HISTORY_CHARS] + " […]"
+        dipangkas.append({"role": peran, "content": isi})
+    return dipangkas
+
+
 class LLMGenerator:
     """Multimodal-aware generator with multi-provider support."""
 
@@ -235,24 +291,49 @@ class LLMGenerator:
         model: str | None = None,
         level: str | None = None,
         style: str | None = None,
+        history: list[dict] | None = None,
     ) -> str:
+        """Jawaban chat biasa.
+
+        `history` dikirim sebagai pesan terpisah, bukan disisipkan ke dalam
+        prompt pengguna: bentuk itu yang dipahami model sebagai percakapan, dan
+        bentuk yang sama sudah dipakai jalur Guided Learning. Tanpa riwayat,
+        "jelaskan lebih detail" dijawab seolah pertanyaan pertama.
+        """
         user_prompt = build_user_prompt(question, context)
         user_content = self._build_user_content(user_prompt, context)
 
         messages: list[Any] = [
             {"role": "system", "content": build_system_prompt(level, style)},
+            *trim_history(history),
             {"role": "user", "content": user_content},
         ]
 
-        return await self._call_with_retry(messages, model=model)
+        return bersihkan_jawaban(
+            await self._call_with_retry(messages, model=model), dari="generate",
+        )
 
     async def decompose_query(
-        self, question: str, model: str | None = None
+        self,
+        question: str,
+        model: str | None = None,
+        history: list[dict] | None = None,
     ) -> dict[str, Any]:
-        """Stage 1: enrich the raw question with topic/key-concepts before retrieval."""
+        """Stage 1: enrich the raw question with topic/key-concepts before retrieval.
+
+        `history` ikut dikirim karena pertanyaan lanjutan hampir tidak pernah
+        lengkap. "Jelaskan lebih detail" tidak memuat satu pun kata benda yang
+        bisa dicari, sehingga pencarian atas kalimat itu mengembalikan halaman
+        yang tidak ada hubungannya dengan yang sedang dibahas — bukan jawaban
+        yang lebih dangkal, melainkan jawaban atas pertanyaan lain.
+        """
+        past = format_history(history)
         messages: list[Any] = [
             {"role": "system", "content": DECOMPOSE_SYSTEM_PROMPT},
-            {"role": "user", "content": f"[PERTANYAAN MAHASISWA]\n{question}"},
+            {"role": "user", "content": (
+                (f"[RIWAYAT PERCAKAPAN]\n{past}\n\n" if past else "")
+                + f"[PERTANYAAN MAHASISWA]\n{question}"
+            )},
         ]
         try:
             raw = await self._call_with_retry(
@@ -516,6 +597,105 @@ class LLMGenerator:
             )
         return content
 
+    async def _stream(
+        self, messages: list[Any], *, reasoning: bool, model: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Alirkan jawaban potongan demi potongan.
+
+        Total waktunya tidak berubah; yang berubah hanya kapan tanda kehidupan
+        pertama muncul. Dengan waktu tanggap yang terukur sekitar dua menit,
+        perbedaan itu menentukan apakah mahasiswa menunggu atau menyerah.
+        """
+        client, model_id = self._resolve(model)
+        try:
+            aliran = await client.chat.completions.create(
+                model=model_id,
+                messages=messages,
+                temperature=settings.generation_temperature,
+                max_tokens=settings.generation_max_tokens,
+                stream=True,
+                extra_body=_reasoning_body() if reasoning else NO_REASONING_BODY,
+            )
+        except Exception as exc:
+            raise GenerationError(f"Aliran jawaban gagal: {exc}") from exc
+
+        async for bagian in aliran:
+            if not bagian.choices:
+                continue
+            isi = getattr(bagian.choices[0].delta, "content", None)
+            if isi:
+                yield isi
+
+    async def generate_with_custom_prompt(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        context: FormattedContext,
+        *,
+        model: str | None = None,
+        history: list[dict] | None = None,
+    ) -> str:
+        """Seperti `generate()`, tetapi system prompt datang dari pemanggil.
+
+        Dipakai jalur Guided Learning, yang menyusun prompt-nya sendiri dari
+        template tugas belajar ditambah gaya dan kedalaman pilihan mahasiswa.
+        """
+        messages: list[Any] = [
+            {"role": "system", "content": system_prompt},
+            *trim_history(history),
+            {"role": "user", "content": self._build_user_content(user_prompt, context)},
+        ]
+        return bersihkan_jawaban(
+            await self._call_with_retry(messages, model=model),
+            dari="generate_with_custom_prompt",
+        )
+
+    async def stream_with_custom_prompt(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        context: FormattedContext,
+        history: list[dict] | None = None,
+        *,
+        model: str | None = None,
+    ) -> AsyncIterator[str]:
+        """Sama seperti di atas, tetapi jawabannya dialirkan.
+
+        Bila aliran berakhir tanpa satu karakter pun, panggilan diulang sekali
+        tanpa reasoning: token berpikir berbagi jatah dengan jawaban dan bisa
+        menghabiskannya, dan pengulangan tanpa reasoning memulihkannya.
+        """
+        messages: list[Any] = [
+            {"role": "system", "content": system_prompt},
+            *trim_history(history),
+            {"role": "user", "content": self._build_user_content(user_prompt, context)},
+        ]
+
+        # Disaring per potongan karena potongan itu langsung terkirim ke layar;
+        # pencatatannya dikumpulkan sampai akhir supaya satu jawaban menghasilkan
+        # satu baris log, bukan satu baris per potongan.
+        terkumpul = 0
+        mentah: list[str] = []
+        dibuang = 0
+        async for potongan in self._stream(messages, reasoning=True, model=model):
+            terkumpul += len(potongan)
+            mentah.append(potongan)
+            bersih, n = buang_cjk(potongan)
+            dibuang += n
+            if bersih:
+                yield bersih
+
+        if terkumpul == 0:
+            logger.warning("Aliran jawaban kosong — mengulang sekali tanpa reasoning")
+            async for potongan in self._stream(messages, reasoning=False, model=model):
+                mentah.append(potongan)
+                bersih, n = buang_cjk(potongan)
+                dibuang += n
+                if bersih:
+                    yield bersih
+
+        catat_kebocoran("".join(mentah), dibuang, dari="stream_with_custom_prompt")
+
     async def _call_with_retry(
         self,
         messages: list[Any],
@@ -523,6 +703,7 @@ class LLMGenerator:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning: bool = True,
     ) -> str:
         """Panggil model, dengan dua jenis percobaan ulang yang berbeda sebabnya.
 
@@ -538,7 +719,8 @@ class LLMGenerator:
         while True:
             try:
                 return await self._call_once(
-                    messages, model=model, temperature=temperature, max_tokens=max_tok
+                    messages, model=model, temperature=temperature,
+                    max_tokens=max_tok, reasoning=reasoning,
                 )
             except TruncatedGenerationError:
                 sisa -= 1
@@ -566,6 +748,7 @@ class LLMGenerator:
         model: str | None = None,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        reasoning: bool = True,
     ) -> str:
         client, model_id = self._resolve(model)
         temp = temperature if temperature is not None else settings.generation_temperature
@@ -576,6 +759,12 @@ class LLMGenerator:
                 messages=messages,
                 temperature=temp,
                 max_tokens=max_tok,
+                # Langkah bantu — penguraian pertanyaan, ekstraksi konsep,
+                # penyusunan soal — adalah tugas mekanis yang tidak diuntungkan
+                # penalaran, sementara token berpikir berbagi jatah dengan
+                # jawabannya. Mematikannya di situ memangkas waktu tanggap
+                # tanpa menurunkan mutu keluaran.
+                extra_body=_reasoning_body() if reasoning else NO_REASONING_BODY,
             )
         except _RETRYABLE:
             raise

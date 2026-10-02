@@ -160,7 +160,11 @@ class TestParseQuizJson:
         assert quiz[0]["answer_index"] == 1
 
     def test_extracts_array_from_surrounding_text(self) -> None:
-        raw = 'Berikut soalnya:\n[{"question":"Q?","options":["a","b","c","d"],"answer_index":0}]\nsekian'
+        raw = (
+            'Berikut soalnya:\n'
+            '[{"question":"Q?","options":["a","b","c","d"],"answer_index":0}]\n'
+            'sekian'
+        )
         assert len(parse_quiz_json(raw)) == 1
 
     def test_rejects_wrong_option_count(self) -> None:
@@ -184,12 +188,27 @@ class TestBuildSystemPrompt:
     def test_detail_adds_deep_instruction(self) -> None:
         assert "MENDALAM" in build_system_prompt("detail")
 
-    def test_standar_is_base_prompt(self) -> None:
-        assert build_system_prompt("standar") == SYSTEM_PROMPT
+    def test_nama_lama_tetap_dikenali(self) -> None:
+        """Profil mahasiswa yang tersimpan dengan nama Indonesia tidak boleh pecah.
 
-    def test_none_and_unknown_fall_back_to_base(self) -> None:
-        assert build_system_prompt(None) == SYSTEM_PROMPT
-        assert build_system_prompt("ngaco") == SYSTEM_PROMPT
+        Tingkat "standar" dihapus karena permintaannya sama dengan "sederhana";
+        keduanya kini bermuara ke "simple".
+        """
+        assert build_system_prompt("sederhana") == build_system_prompt("simple")
+        assert build_system_prompt("standar") == build_system_prompt("simple")
+        assert build_system_prompt("detail") == build_system_prompt("detailed")
+        assert build_system_prompt("akademis") == build_system_prompt("academic")
+
+    def test_none_dan_tak_dikenal_jatuh_ke_bawaan(self) -> None:
+        """Tanpa level, jawaban memakai kedalaman bawaan — bukan tanpa instruksi.
+
+        Dibiarkan tanpa instruksi, panjang jawaban sepenuhnya diputuskan model
+        dan berubah-ubah antar pertanyaan yang setara.
+        """
+        bawaan = build_system_prompt("detailed")
+        assert build_system_prompt(None) == bawaan
+        assert build_system_prompt("ngaco") == bawaan
+        assert bawaan != SYSTEM_PROMPT
 
 
 class TestSystemPrompt:

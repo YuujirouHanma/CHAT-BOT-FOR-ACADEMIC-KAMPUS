@@ -40,8 +40,8 @@ async def _exercises(
     pipeline: RAGPipeline, body, tenant: TenantContext,
 ) -> list[livecode_mod.Exercise]:
     return await pipeline.livecode_exercises(
-        body.course_id, list(body.weeks), tenant_id=tenant.tenant_id,
-        count=getattr(body, "count", 3), model=body.model,
+        body.mata_kuliah(), body.minggu(), tenant_id=tenant.tenant_id,
+        count=getattr(body, "count", 3), model=body.kunci_model(),
     )
 
 
@@ -54,19 +54,28 @@ async def get_exercises(
 ) -> LivecodeExercisesResponse:
     """Latihan koding yang diturunkan dari materi minggu tertentu."""
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
-    tenant.require_course(body.course_id)
+    mata_kuliah = body.mata_kuliah()
+    # Salah satu nama wajib ada. Ditegakkan di sini, bukan di skema: pesan
+    # pydantic hanya menyebut satu nama, sedangkan pemanggil mungkin memakai
+    # yang satunya dan tidak akan paham apa yang kurang.
+    if not mata_kuliah:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sebutkan mata kuliahnya lewat course_id atau content_id.",
+        )
+    tenant.require_course(mata_kuliah)
 
     latihan = await _exercises(pipeline, body, tenant)
     if not latihan:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                f"Belum ada materi terindeks untuk '{body.course_id}' pada minggu "
-                f"{body.weeks}, sehingga latihan tidak dapat disusun"
+                f"Belum ada materi terindeks untuk '{mata_kuliah}' pada minggu "
+                f"{body.minggu()}, sehingga latihan tidak dapat disusun"
             ),
         )
     return LivecodeExercisesResponse(
-        course_id=body.course_id,
+        course_id=mata_kuliah,
         exercises=[LivecodeExerciseInfo(**e.as_public()) for e in latihan],
     )
 
@@ -85,21 +94,49 @@ async def submit_code(
     jawaban menyelesaikan soalnya, tetapi menghapus proses belajarnya.
     """
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
-    tenant.require_course(body.course_id)
+    mata_kuliah = body.mata_kuliah()
+    # Salah satu nama wajib ada. Ditegakkan di sini, bukan di skema: pesan
+    # pydantic hanya menyebut satu nama, sedangkan pemanggil mungkin memakai
+    # yang satunya dan tidak akan paham apa yang kurang.
+    if not mata_kuliah:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sebutkan mata kuliahnya lewat course_id atau content_id.",
+        )
+    tenant.require_course(mata_kuliah)
 
-    latihan = await _exercises(pipeline, body, tenant)
-    dipilih = next(
-        (e for e in latihan if e.exercise_id == body.exercise_id), None,
+    # Dibaca dari simpanan, BUKAN disusun ulang. Menyusun ulang berarti memanggil
+    # pembuat soal sekali lagi di tiap pengiriman, dan mencocokkan hasilnya
+    # dengan `count` yang kebetulan ikut terkirim — daftar dengan `count` lain
+    # menghasilkan soal lain, sehingga latihan yang sedang dikerjakan mahasiswa
+    # mendadak "tidak ditemukan".
+    dipilih = livecode_mod.load_exercise(
+        body.exercise_id, tenant_id=tenant.tenant_id,
     )
+    if dipilih is None:
+        # Cadangan untuk latihan yang didaftar sebelum penyimpanan ini ada.
+        latihan = await _exercises(pipeline, body, tenant)
+        dipilih = next(
+            (e for e in latihan if e.exercise_id == body.exercise_id), None,
+        )
     if dipilih is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Latihan '{body.exercise_id}' tidak ditemukan",
+            detail=(
+                f"Latihan '{body.exercise_id}' tidak ditemukan. Muat ulang "
+                f"daftar latihannya, lalu kirim kodenya sekali lagi."
+            ),
         )
+    # Latihan tersimpan milik tenant ini, tetapi belum tentu milik mata kuliah
+    # yang boleh disentuh kunci ini — `require_course` di atas hanya memeriksa
+    # mata kuliah yang DIAKUI pengirim, bukan pemilik sebenarnya latihan itu.
+    if dipilih.course_id:
+        tenant.require_course(dipilih.course_id)
 
     hasil = await pipeline.grade_livecode(
         dipilih, body.code, tenant_id=tenant.tenant_id,
-        student_id=body.student_id, session_id=body.session_id, model=body.model,
+        student_id=body.student_id, session_id=body.session_id,
+        model=body.kunci_model(),
     )
     return LivecodeSubmitResponse(**hasil)
 

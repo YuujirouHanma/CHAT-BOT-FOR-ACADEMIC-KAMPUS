@@ -36,6 +36,7 @@ dan koreksi utuh hanya ketika mahasiswa memintanya.
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import re
 from dataclasses import dataclass
@@ -43,6 +44,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
+from src import gen_cache
 from src.config import PROJECT_ROOT
 from src.security import redact
 from src.tenancy import require_tenant_id, storage_prefix
@@ -119,6 +121,50 @@ class Exercise:
                 tc.get("input") for tc in self.test_cases[:3] if "input" in tc
             ],
         }
+
+    def as_dict(self) -> dict[str, Any]:
+        """Bentuk LENGKAP, untuk disimpan di sisi server saja.
+
+        Memuat rubrik dan keluaran yang diharapkan, jadi jangan pernah
+        dikirimkan ke klien — pakai `as_public()` untuk itu.
+        """
+        return {
+            "exercise_id": self.exercise_id,
+            "title": self.title,
+            "prompt": self.prompt,
+            "language": self.language,
+            "starter_code": self.starter_code,
+            "expected_behavior": self.expected_behavior,
+            "required_function": self.required_function,
+            "forbidden_names": list(self.forbidden_names),
+            "test_cases": [dict(tc) for tc in self.test_cases],
+            "rubric": list(self.rubric),
+            "course_id": self.course_id,
+            "week": self.week,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> Exercise:
+        """Kebalikan `as_dict`. Medan yang tidak dikenal diabaikan.
+
+        Diabaikan, bukan ditolak: entri yang tersimpan sebelum sebuah medan
+        ditambahkan harus tetap bisa dibaca, dan menolaknya berarti kiriman
+        mahasiswa gagal dinilai hanya karena bentuk simpanannya bertambah.
+        """
+        return cls(
+            exercise_id=str(d.get("exercise_id") or ""),
+            title=str(d.get("title") or ""),
+            prompt=str(d.get("prompt") or ""),
+            language=str(d.get("language") or "python"),
+            starter_code=str(d.get("starter_code") or ""),
+            expected_behavior=str(d.get("expected_behavior") or ""),
+            required_function=str(d.get("required_function") or ""),
+            forbidden_names=tuple(d.get("forbidden_names") or ()),
+            test_cases=tuple(dict(tc) for tc in (d.get("test_cases") or ())),
+            rubric=tuple(d.get("rubric") or ()),
+            course_id=d.get("course_id"),
+            week=d.get("week"),
+        )
 
 
 # --- Analisis statis (tanpa eksekusi) -------------------------------------------
@@ -336,6 +382,31 @@ def attempt_stats(*, tenant_id: str, exercise_id: str) -> dict[str, Any]:
     }
 
 
+# Bahasa yang namanya dikenali. Nama di luar daftar ini DITERIMA apa adanya —
+# yang penting ia bukan "python", karena itulah yang menentukan apakah kodenya
+# diurai dengan `ast.parse`. Menolak nama asing hanya akan memaksa kembali ke
+# bawaan yang salah.
+_ALIAS_BAHASA: Final[dict[str, str]] = {
+    "py": "python", "python3": "python",
+    "mysql": "sql", "postgres": "sql", "postgresql": "sql", "sqlite": "sql",
+    "js": "javascript", "node": "javascript",
+    "c++": "cpp", "cplusplus": "cpp", "c#": "csharp",
+}
+
+
+def _bahasa(nilai: object) -> str:
+    """Nama bahasa yang sudah dibakukan; "python" bila tidak disebut.
+
+    Bawaannya tetap "python" karena itu satu-satunya bahasa yang analisis
+    statisnya ada — menebak bahasa lain tanpa disebut model akan mematikan
+    pemeriksaan sintaks untuk mata kuliah yang justru memakainya.
+    """
+    nama = str(nilai or "").strip().lower()
+    if not nama:
+        return "python"
+    return _ALIAS_BAHASA.get(nama, nama)
+
+
 # --- Pembentukan latihan dari soal koding evaluasi -------------------------------
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -346,21 +417,40 @@ def exercise_from_item(
     *,
     course_id: str | None = None,
     week: int | None = None,
-    index: int = 0,
 ) -> Exercise:
     """Ubah satu butir soal `koding` dari evaluasi menjadi latihan livecode.
 
     Menyatukan keduanya disengaja: soal koding pada ETS dan latihan mandiri
     adalah hal yang sama bagi mahasiswa, dan menilainya dengan dua jalur berbeda
     akan menghasilkan dua standar penilaian yang berbeda pula.
+
+    `exercise_id` diturunkan dari ISI soal, bukan dari posisinya dalam daftar.
+    Versi sebelumnya memakai nomor urut, sehingga identitas sebuah latihan ikut
+    bergantung pada BERAPA BANYAK latihan yang kebetulan diminta: daftar dengan
+    `count=5` dan pengiriman dengan `count=3` menyusun himpunan soal yang
+    berbeda, dan nomor urut yang sama menunjuk ke soal yang lain sama sekali.
     """
     judul = (item.get("question") or "Latihan koding").strip()
     slug = _SLUG_RE.sub("-", judul.lower())[:40].strip("-") or "latihan"
+    # Perilaku yang diharapkan dan nama fungsi ikut disidik: dua soal boleh
+    # berjudul mirip (slug dipangkas 40 aksara) tetapi menuntut hal berbeda, dan
+    # menilai kiriman dengan rubrik soal lain lebih buruk daripada menolaknya.
+    sidik = hashlib.sha256(
+        "\x00".join((
+            judul,
+            str(item.get("expected_behavior") or ""),
+            str(item.get("required_function") or ""),
+        )).encode("utf-8"),
+    ).hexdigest()[:12]
     return Exercise(
-        exercise_id=f"{course_id or 'umum'}-{week or 0}-{index}-{slug}",
+        exercise_id=f"{course_id or 'umum'}-{week or 0}-{slug}-{sidik}",
         title=judul[:120],
         prompt=judul,
         starter_code=item.get("starter_code", ""),
+        # Bahasa menentukan apakah kode dianalisis statis atau langsung
+        # diserahkan ke tinjauan LLM. Tanpa ini nilainya selalu jatuh ke
+        # "python", sehingga jawaban SQL yang benar dibalas "invalid syntax".
+        language=_bahasa(item.get("language")),
         expected_behavior=item.get("expected_behavior", ""),
         required_function=item.get("required_function", ""),
         rubric=tuple(item.get("rubric") or ()),
@@ -368,3 +458,43 @@ def exercise_from_item(
         course_id=course_id,
         week=week,
     )
+
+
+# --- Penyimpanan definisi latihan ------------------------------------------
+#
+# Mahasiswa mengirim kode dengan menyebut `exercise_id` saja. Definisinya —
+# rubrik, perilaku yang diharapkan, kasus uji — harus datang dari sisi server:
+# kalau klien boleh mengirimkannya, cukup kirim rubrik kosong untuk lulus.
+#
+# Sebelumnya definisi itu disusun ULANG saat pengiriman, dengan memanggil
+# pembuat soal sekali lagi. Itu menautkan identitas latihan ke parameter
+# `count`, dan membuat tiap pengiriman membayar satu panggilan LLM hanya untuk
+# membaca kembali sesuatu yang sudah pernah dibuat.
+
+_JENIS_LATIHAN: Final = "livecode_exercise"
+
+
+def save_exercise(exercise: Exercise, *, tenant_id: str) -> None:
+    """Simpan definisi lengkap sebuah latihan, terkunci pada tenant-nya."""
+    gen_cache.save(
+        _JENIS_LATIHAN, exercise.exercise_id, "", exercise.as_dict(),
+        tenant_id=tenant_id, material_hash="",
+    )
+
+
+def load_exercise(exercise_id: str, *, tenant_id: str) -> Exercise | None:
+    """Definisi latihan yang tersimpan, atau None bila belum pernah dibuat.
+
+    Tanpa `material_hash` di kuncinya — tidak perlu, karena `exercise_id`
+    sendiri sudah sidik jari isi soalnya: materi berubah berarti soalnya
+    berubah, dan soal berubah berarti id-nya berbeda. Entri lama tidak pernah
+    tersaji untuk soal baru.
+    """
+    if not exercise_id:
+        return None
+    data = gen_cache.load(
+        _JENIS_LATIHAN, exercise_id, "", tenant_id=tenant_id, material_hash="",
+    )
+    if not isinstance(data, dict):
+        return None
+    return Exercise.from_dict(data)
