@@ -24,8 +24,10 @@ from src.api.routes import (
     browse,
     catalog,
     chat,
+    concepts,
     conversations,
     evaluation,
+    guided,
     livecode,
     models,
     styles,
@@ -182,7 +184,12 @@ app.include_router(conversations.router, dependencies=_auth)
 app.include_router(evaluation.router, dependencies=_auth)
 app.include_router(livecode.router, dependencies=_auth)
 app.include_router(validation.router, dependencies=_auth)
+app.include_router(concepts.router, dependencies=_auth)
 app.include_router(chat.router, dependencies=_auth)
+# Didaftarkan SESUDAH chat: keduanya melayani tanya-jawab, dan urutan ini
+# menjaga agar jalur percakapan biasa tetap yang pertama dicoba pencocok
+# rute bila suatu saat awalannya bersinggungan.
+app.include_router(guided.router, dependencies=_auth)
 
 # Pengelolaan tenant sengaja TIDAK didaftarkan kecuali dinyalakan eksplisit.
 # Endpoint ini dapat menerbitkan kunci untuk tenant mana pun; kebocorannya

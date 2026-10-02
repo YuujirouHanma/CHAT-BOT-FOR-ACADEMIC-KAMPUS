@@ -16,7 +16,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from src.api.auth import assert_body_tenant, request_id, tenant_catalog
-from src.api.dependencies import get_pipeline
+from src.api.dependencies import get_pipeline, guard_material
 from src.api.schemas import (
     CourseInfo,
     CourseListResponse,
@@ -36,25 +36,6 @@ from src.tenancy import TenantContext
 router = APIRouter(prefix="/catalog", tags=["catalog"])
 
 
-async def _guard_material(
-    tenant: TenantContext, pipeline: RAGPipeline, content_id: str,
-) -> None:
-    """ABAC untuk endpoint yang hanya menerima `content_id`, bukan `course_id`.
-
-    Pertanyaan pembuka dan kuis dibangkitkan dari ISI materi, jadi membiarkannya
-    terbuka membuat pembatasan mata kuliah pada endpoint lain kehilangan arti —
-    kunci yang dibatasi ke satu fakultas tetap dapat membaca ringkasan materi
-    fakultas lain lewat jalan memutar ini.
-
-    Kunci yang tidak dibatasi keluar lebih dulu, sehingga jalur umum tidak
-    membayar satu kueri tambahan.
-    """
-    if tenant.allowed_courses is None:
-        return
-    course_id = await pipeline._store.get_content_course(
-        content_id, tenant_id=tenant.tenant_id,
-    )
-    tenant.require_course(course_id)
 
 
 @router.get("/courses", response_model=CourseListResponse)
@@ -129,7 +110,7 @@ async def get_starter_questions(
 
     `model` (query param) opsional — key model dari /models untuk memilih LLM.
     """
-    await _guard_material(tenant, pipeline, content_id)
+    await guard_material(tenant, pipeline, content_id)
     questions = await pipeline.starter_questions(
         content_id, source_file, model=model, tenant_id=tenant.tenant_id,
     )
@@ -155,7 +136,7 @@ async def get_quiz(
 
     `model` (query param) opsional. Tiap soal: pertanyaan, 4 opsi, answer_index, penjelasan.
     """
-    await _guard_material(tenant, pipeline, content_id)
+    await guard_material(tenant, pipeline, content_id)
     quiz = await pipeline.quiz(
         content_id, source_file, model=model, tenant_id=tenant.tenant_id,
     )
@@ -183,7 +164,7 @@ async def submit_quiz(
     `answers` = indeks opsi (0-3) yang dipilih, urut sesuai soal dari GET .../quiz.
     """
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
-    await _guard_material(tenant, pipeline, content_id)
+    await guard_material(tenant, pipeline, content_id)
     try:
         result = await pipeline.grade_quiz(
             content_id, source_file, body.answers,
