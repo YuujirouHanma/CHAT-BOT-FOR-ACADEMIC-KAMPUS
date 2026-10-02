@@ -113,25 +113,35 @@ async def get_questions(
     dapat membacanya sebelum menjawab.
     """
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
-    tenant.require_course(body.course_id)
+    mata_kuliah = body.mata_kuliah()
+    # Salah satu nama wajib ada. Ditegakkan di sini, bukan di skema: pesan
+    # pydantic hanya menyebut satu nama, sedangkan pemanggil mungkin memakai
+    # yang satunya dan tidak akan paham apa yang kurang.
+    if not mata_kuliah:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sebutkan mata kuliahnya lewat course_id atau content_id.",
+        )
+    tenant.require_course(mata_kuliah)
 
     plan = _resolve_plan(
-        body.week, body.weeks, body.kind, body.counts, tenant.evaluation_schedule,
+        body.week, body.minggu() or None, body.kind, body.counts,
+        tenant.evaluation_schedule,
     )
     items = await pipeline.evaluation(
-        body.course_id, plan, tenant_id=tenant.tenant_id, model=body.model,
+        mata_kuliah, plan, tenant_id=tenant.tenant_id, model=body.kunci_model(),
     )
     if not items:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=(
-                f"Belum ada materi terindeks untuk '{body.course_id}' "
+                f"Belum ada materi terindeks untuk '{mata_kuliah}' "
                 f"{plan.range_text}, sehingga soal tidak dapat disusun"
             ),
         )
 
     return EvaluationQuestionsResponse(
-        course_id=body.course_id,
+        course_id=mata_kuliah,
         plan=_plan_info(plan),
         items=[
             EvaluationItemInfo(
@@ -159,13 +169,23 @@ async def submit(
     diambil dari cache, bukan disusun ulang.
     """
     assert_body_tenant(tenant, body.tenant_id, request_id_=request_id(request))
-    tenant.require_course(body.course_id)
+    mata_kuliah = body.mata_kuliah()
+    # Salah satu nama wajib ada. Ditegakkan di sini, bukan di skema: pesan
+    # pydantic hanya menyebut satu nama, sedangkan pemanggil mungkin memakai
+    # yang satunya dan tidak akan paham apa yang kurang.
+    if not mata_kuliah:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Sebutkan mata kuliahnya lewat course_id atau content_id.",
+        )
+    tenant.require_course(mata_kuliah)
 
     plan = _resolve_plan(
-        body.week, body.weeks, body.kind, body.counts, tenant.evaluation_schedule,
+        body.week, body.minggu() or None, body.kind, body.counts,
+        tenant.evaluation_schedule,
     )
     items = await pipeline.evaluation(
-        body.course_id, plan, tenant_id=tenant.tenant_id, model=body.model,
+        mata_kuliah, plan, tenant_id=tenant.tenant_id, model=body.kunci_model(),
     )
     if not items:
         raise HTTPException(
@@ -174,10 +194,11 @@ async def submit(
         )
 
     hasil = await pipeline.grade_evaluation(
-        items, list(body.answers), tenant_id=tenant.tenant_id, model=body.model,
+        items, list(body.answers), tenant_id=tenant.tenant_id,
+        model=body.kunci_model(),
     )
     return EvaluationSubmitResponse(
-        course_id=body.course_id,
+        course_id=mata_kuliah,
         plan=_plan_info(plan),
         total=hasil["total"],
         benar=hasil["benar"],

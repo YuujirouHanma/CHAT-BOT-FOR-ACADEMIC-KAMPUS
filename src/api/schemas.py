@@ -8,9 +8,10 @@ ambang, jauh sebelum menyentuh disk atau Qdrant.
 """
 from __future__ import annotations
 
+import re
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --- pola bersama ---
 # Identitas yang ikut menjadi nama berkas / kunci filter: tanpa garis miring,
@@ -36,12 +37,26 @@ class TenantScopedRequest(BaseModel):
 
 # --- Chat ---
 class QueryRequest(TenantScopedRequest):
+    # `protected_namespaces` dikosongkan karena portal kampus menyebut modelnya
+    # `model_provider`/`model_name`, sementara pydantic memesan awalan `model_`
+    # untuk medannya sendiri. Tanpa ini setiap impor memuntahkan peringatan —
+    # dan peringatan yang selalu muncul adalah peringatan yang berhenti dibaca.
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
     question: str = Field(min_length=1, max_length=2000)
     session_id: str | None = Field(default=None, max_length=64, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     content_id: str | None = Field(default=None, pattern=_ID_PATTERN)
     source_filter: str | None = Field(default=None, max_length=255, pattern=_FILENAME_PATTERN)
     model: str | None = Field(default=None, max_length=64)  # registry key; None = default
-    level: Literal["sederhana", "standar", "detail"] | None = None  # kedalaman jawaban
+    # Nama Inggris karena itu yang dipakai portal kampus pada tombolnya.
+    # Nama lama (sederhana/standar/detail) masih dikenali di dalam, tetapi
+    # tidak lagi diiklankan: "standar" dan "sederhana" meminta hal yang sama.
+    # Tiga yang pertama dipakai sekarang; empat sisanya nama lama yang masih
+    # mungkin tersimpan di sesi. Semua diselesaikan lewat ALIAS_KEDALAMAN.
+    level: Literal[
+        "simple", "detailed", "academic",
+        "sederhana", "standar", "detail", "akademis",
+    ] | None = None  # kedalaman jawaban
     # Gaya belajar: mengganti system prompt (CARA menjawab) dan alat yang
     # dipakai LLM. Lihat GET /learning-styles. Berbeda dari `level`.
     style: str | None = Field(default=None, max_length=32)
@@ -60,6 +75,57 @@ class QueryRequest(TenantScopedRequest):
     # Beberapa minggu sekaligus, mis. saat mahasiswa menyiapkan ujian. Bila diisi,
     # nilainya menang atas `week`. `week` dipertahankan agar klien lama tetap jalan.
     weeks: list[int] | None = Field(default=None, max_length=52)
+
+    # --- nama-nama yang dipakai portal kampus --------------------------------
+    # Lima medan di bawah ini adalah kosakata LMS untuk hal yang namanya sudah
+    # ada di atas. Diterima, bukan ditolak, karena `extra="forbid"` membuat
+    # setiap permintaan dari portal dibalas 422 — bukan "sebagian fitur tidak
+    # jalan", melainkan chat mati total. Kanonisasinya terjadi di metode di
+    # bawah, sehingga sisa kode hanya mengenal satu nama untuk satu hal.
+    section_ids: list[int] | None = Field(
+        default=None, max_length=64,
+        description="Nama lain `weeks`, kosakata LMS yang dipakai portal kampus.",
+    )
+    model_provider: str | None = Field(default=None, max_length=32)
+    model_name: str | None = Field(default=None, max_length=255)
+    student_name: str | None = Field(default=None, max_length=128)
+    user_id: str | int | None = Field(
+        default=None, description="Nama lain `student_id` di portal kampus.",
+    )
+
+    def active_weeks(self) -> list[int]:
+        """Minggu yang berlaku, menyatukan tiga bentuk yang dikirim klien.
+
+        `weeks` (terpandu) dan `week` (klien lama) memakai kosakata katalog,
+        sementara `section_ids` memakai kosakata LMS — ketiganya menunjuk hal
+        yang sama, dan satu-satunya tempat mereka disatukan adalah di sini.
+        """
+        if self.weeks:
+            return sorted({int(w) for w in self.weeks})
+        if self.week:
+            return [self.week]
+        return sorted({int(w) for w in self.section_ids or []})
+
+    def kunci_model(self) -> str | None:
+        """Satu kunci registry dari dua cara klien menyebut model.
+
+        Portal mengirim penyedia dan nama terpisah; registry memakai satu kunci
+        yang penyedianya sudah melekat. `model` menang bila keduanya terkirim.
+        """
+        if self.model:
+            return self.model
+        return (self.model_name or "").strip() or None
+
+    def identitas_mahasiswa(self) -> str | None:
+        """Pengenal mahasiswa, apa pun nama medan yang dipakai pemanggil.
+
+        Dipakai menyaring daftar riwayat percakapan miliknya sendiri. Tanpa
+        penyatuan ini, portal yang mengirim `user_id` menghasilkan percakapan
+        tanpa pemilik — dan daftar riwayat setiap mahasiswa jadi kosong.
+        """
+        if self.student_id:
+            return self.student_id
+        return str(self.user_id) if self.user_id not in (None, "") else None
 
 
 class SourceInfo(BaseModel):
@@ -388,9 +454,9 @@ class EvaluationScheduleResponse(BaseModel):
 
 class _EvaluationTarget(BaseModel):
     """Bagian permintaan yang menentukan evaluasi mana yang dimaksud."""
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
-    course_id: str = Field(min_length=1, max_length=128)
+    course_id: str | None = Field(default=None, max_length=128)
     # Salah satu wajib: `week` memakai jadwal bawaan, `weeks` rentang bebas.
     week: int | None = Field(default=None, ge=1, le=52)
     weeks: list[int] | None = Field(default=None, max_length=52)
@@ -399,6 +465,31 @@ class _EvaluationTarget(BaseModel):
     counts: dict[str, int] | None = None
     model: str | None = Field(default=None, max_length=64)
     tenant_id: str | None = Field(default=None, max_length=64)
+
+    # --- nama lain yang dipakai portal kampus --------------------------------
+    # Kosakata LMS untuk hal yang namanya sudah ada di atas. Diterima, bukan
+    # ditolak: `extra="forbid"` membuat permintaan dari portal dibalas 422, dan
+    # di layar mahasiswa itu muncul sebagai "layanan tidak tersedia".
+    content_id: str | None = Field(default=None, max_length=128)
+    section_ids: list[int] | None = Field(default=None, max_length=52)
+    model_provider: str | None = Field(default=None, max_length=32)
+    model_name: str | None = Field(default=None, max_length=255)
+
+    def mata_kuliah(self) -> str:
+        """Mata kuliah yang dimaksud, apa pun nama medan yang dipakai pemanggil."""
+        return self.course_id or self.content_id or ""
+
+    def minggu(self) -> list[int]:
+        """Minggu yang berlaku, menyatukan kedua kosakata."""
+        if self.weeks:
+            return sorted({int(w) for w in self.weeks})
+        return sorted({int(w) for w in self.section_ids or []})
+
+    def kunci_model(self) -> str | None:
+        """Satu kunci registry dari dua cara klien menyebut model."""
+        if self.model:
+            return self.model
+        return (self.model_name or "").strip() or None
 
 
 class EvaluationQuestionsRequest(_EvaluationTarget):
@@ -463,12 +554,37 @@ class EvaluationSubmitResponse(BaseModel):
 
 # --- Livecode: latihan koding ---
 class _LivecodeTarget(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
-    course_id: str = Field(min_length=1, max_length=128)
-    weeks: list[int] = Field(min_length=1, max_length=52)
+    course_id: str | None = Field(default=None, max_length=128)
+    weeks: list[int] | None = Field(default=None, max_length=52)
     model: str | None = Field(default=None, max_length=64)
     tenant_id: str | None = Field(default=None, max_length=64)
+
+    # --- nama lain yang dipakai portal kampus --------------------------------
+    # Kosakata LMS untuk hal yang namanya sudah ada di atas. Diterima, bukan
+    # ditolak: `extra="forbid"` membuat permintaan dari portal dibalas 422, dan
+    # di layar mahasiswa itu muncul sebagai "layanan tidak tersedia".
+    content_id: str | None = Field(default=None, max_length=128)
+    section_ids: list[int] | None = Field(default=None, max_length=52)
+    model_provider: str | None = Field(default=None, max_length=32)
+    model_name: str | None = Field(default=None, max_length=255)
+
+    def mata_kuliah(self) -> str:
+        """Mata kuliah yang dimaksud, apa pun nama medan yang dipakai pemanggil."""
+        return self.course_id or self.content_id or ""
+
+    def minggu(self) -> list[int]:
+        """Minggu yang berlaku, menyatukan kedua kosakata."""
+        if self.weeks:
+            return sorted({int(w) for w in self.weeks})
+        return sorted({int(w) for w in self.section_ids or []})
+
+    def kunci_model(self) -> str | None:
+        """Satu kunci registry dari dua cara klien menyebut model."""
+        if self.model:
+            return self.model
+        return (self.model_name or "").strip() or None
 
 
 class LivecodeExercisesRequest(_LivecodeTarget):
@@ -627,3 +743,288 @@ class AdminPurgeResponse(BaseModel):
 # --- Error ---
 class ErrorResponse(BaseModel):
     detail: str
+
+_SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def _bersihkan_session_id(nilai: str | None) -> str | None:
+    if nilai is None or not nilai.strip():
+        return None
+    nilai = nilai.strip()
+    if not _SESSION_ID_RE.match(nilai):
+        raise ValueError("session_id tidak valid")
+    return nilai
+
+
+# --- Guided Learning, latihan, dan konsep ----------------------------------
+# Dipindahkan apa adanya dari layanan tim back-end, bukan ditulis ulang.
+# Bentuk permintaan dan balasan harus sama persis di kedua pemasangan: satu
+# medan yang berbeda namanya sudah cukup membuat portal kampus yang sama
+# tidak dapat memanggil keduanya.
+class UserLearningProfile(BaseModel):
+    """Learning preferences captured during onboarding."""
+    student_name: str = Field(default="Mahasiswa", max_length=64)
+    # Kunci gaya belajar bersama. Nama VARK lama (auditory, reading,
+    # kinesthetic) masih dikenali di dalam, tetapi tidak lagi diiklankan.
+    # Enam kunci pertama adalah yang dipakai sekarang. Empat terakhir nama VARK
+    # lama; tetap DITERIMA karena profil mahasiswa yang sudah tersimpan di basis
+    # data portal masih memakainya, dan menolaknya berarti setiap pengguna lama
+    # dibalas 422. Keduanya diselesaikan ke satu gaya lewat ALIAS_GAYA.
+    learning_style: Literal[
+        "narrative", "visual", "practical", "structured", "concise", "socratic",
+        "auditory", "reading", "kinesthetic",
+    ] = "narrative"
+    explanation_depth: Literal["simple", "detailed", "academic"] = "detailed"
+
+
+class GuidedQueryRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
+    """Request for the guided /guided/ask endpoint."""
+    template_id: str = Field(max_length=64)
+    topic: str = Field(min_length=1, max_length=500,
+                       description="Topik spesifik yang ingin dipelajari")
+    content_id: str | None = Field(default=None, max_length=128)
+    section_id: int | None = None
+    section_ids: list[int] | None = Field(
+        default=None, max_length=64,
+        description="Minggu (section) yang diaktifkan; kosong = seluruh kelas",
+    )
+    session_id: str | None = None
+    model_provider: Literal["openai", "groq", "huggingface", "ollama", "openrouter"] | None = None
+    model_name: str | None = Field(default=None, max_length=255)
+    user_profile: UserLearningProfile = Field(default_factory=UserLearningProfile)
+    class_name: str = Field(default="", max_length=128)
+    section_name: str = Field(default="Minggu Aktif", max_length=128)
+    user_id: int | None = None
+
+    _session_id_sah = field_validator("session_id")(_bersihkan_session_id)
+
+    def active_section_ids(self) -> list[int] | None:
+        """Minggu yang berlaku, menyatukan bentuk lama dan baru.
+
+        ``section_id`` tunggal sudah dikirim frontend sejak sebelum fitur ini
+        ada (dan dulu diabaikan backend). Ia tetap dihormati sebagai cadangan
+        supaya klien versi lama tidak tiba-tiba kehilangan pembatasan minggu.
+        """
+        if self.section_ids:
+            return self.section_ids
+        if self.section_id:
+            return [self.section_id]
+        return None
+
+
+class TemplateInfo(BaseModel):
+    """Single prompt template metadata."""
+    template_id: str
+    label: str
+    icon: str
+    description: str
+    question_pattern: str
+    tags: list[str]
+    requires_topic_input: bool
+
+
+class GuidedTemplatesResponse(BaseModel):
+    """Response for GET /guided/templates."""
+    templates: list[TemplateInfo]
+    section_name: str
+    class_name: str
+    material_topics: list[str]
+
+
+class GuidedQueryResponse(BaseModel):
+    """Response for POST /guided/ask."""
+    answer: str
+    sources: list[SourceInfo]
+    recommendations: list[str]
+    session_id: str
+    interaction_id: str | None = None
+    template_id: str
+    personalized_label: str  # e.g. "Penjelasan untuk Andi (visual learner)"
+
+
+# --- Chat history (HITL log review) ---
+
+
+class ExerciseRequest(BaseModel):
+    """Request for POST /guided/exercise."""
+    topic: str = Field(min_length=1, max_length=500,
+                       description="Topik yang ingin dilatih")
+    content_id: str | None = None
+    class_name: str = Field(default="", max_length=128)
+    section_ids: list[int] | None = Field(
+        default=None, max_length=64,
+        description="Minggu (section) yang diaktifkan; kosong = seluruh kelas",
+    )
+
+
+class ExerciseResponse(BaseModel):
+    """Response for POST /guided/exercise.
+
+    ``content`` adalah isi berkas siap unduh — notebook (.ipynb) atau lembar
+    kerja (.md). Frontend cukup membungkusnya jadi Blob; formatnya ditentukan
+    model dari sifat materinya, jadi tidak diasumsikan di sisi klien.
+    """
+    format: str            # 'notebook' | 'lembar_kerja'
+    filename: str
+    mime_type: str
+    title: str
+    intro: str
+    task_count: int
+    content: str
+    sources: list[SourceInfo]
+
+
+class ConceptSourceInfo(BaseModel):
+    """Di mana sebuah konsep diajarkan, dalam satuan berkas dan rentang halaman."""
+    source_file: str
+    halaman_awal: int | None = None
+    halaman_akhir: int | None = None
+
+
+class ConceptInfo(BaseModel):
+    nama: str
+    deskripsi: str = ""
+    urutan: int = 0
+    jumlah_potongan: int = 0
+    sumber: list[ConceptSourceInfo] = []
+
+
+class FileCoverage(BaseModel):
+    """Berapa banyak potongan sebuah berkas yang masuk ke setidaknya satu konsep.
+
+    Berkas dengan ``tercakup`` nol berarti dianggap tidak relevan oleh ekstraksi.
+    Itu bisa benar (berkas nyasar) atau salah (materi yang terlewat), dan hanya
+    dosen yang bisa membedakannya — karena itu angkanya ikut dikirim.
+    """
+    source_file: str
+    total: int
+    tercakup: int
+
+
+class ConceptPreviewResponse(BaseModel):
+    """Response for GET /concepts/preview."""
+    content_id: str
+    section_id: int | None = None
+    jumlah_chunk: int = 0
+    chunk_dipakai: int = 0
+    concepts: list[ConceptInfo] = []
+    cakupan: list[FileCoverage] = []
+
+
+class ConceptQuestionSourceInput(BaseModel):
+    """Sumber konsep sebagaimana tersimpan di ``concept_source``."""
+    source_file: str
+    halaman_awal: int | None = None
+    halaman_akhir: int | None = None
+
+
+class ConceptQuestionConceptInput(BaseModel):
+    """Satu konsep yang sudah tersimpan, dikirim frontend untuk dibuatkan soal.
+
+    ``concept_id`` ikut dikirim dan dikembalikan apa adanya supaya frontend bisa
+    menautkan soal ke barisnya tanpa mencocokkan nama — nama konsep bisa diedit
+    dosen kapan saja, id-nya tidak.
+    """
+    concept_id: int | None = None
+    nama: str = Field(..., min_length=1, max_length=200)
+    deskripsi: str = Field(default="", max_length=600)
+    sumber: list[ConceptQuestionSourceInput] = []
+
+
+class ConceptQuestionsRequest(BaseModel):
+    """Request for POST /concepts/questions."""
+    content_id: str = Field(..., min_length=1)
+    section_id: int | None = None
+    class_name: str = Field(default="Mata Kuliah", max_length=160)
+    section_name: str = Field(default="Minggu Ini", max_length=160)
+    concepts: list[ConceptQuestionConceptInput] = Field(..., min_length=1, max_length=12)
+    # Batas atas 10: soal per konsep bertumpu pada materi yang sama, dan uji
+    # yang lebih panjang justru dikerjakan asal-asalan — lihat komentar
+    # SOAL_PER_KONSEP_MAKS di src/indexing/questions.py.
+    jumlah_soal: int = Field(default=2, ge=1, le=10)
+
+
+class QuestionOptionInfo(BaseModel):
+    teks: str
+    benar: bool = False
+
+
+class ConceptQuestionInfo(BaseModel):
+    """Satu soal pilihan ganda beserta kunci dan pembahasannya.
+
+    Kunci ikut dikirim karena penerimanya adalah dosen yang harus menilai
+    apakah soalnya benar. Jalur mahasiswa tidak memakai endpoint ini.
+    """
+    concept_id: int | None = None
+    nama_konsep: str = ""
+    tipe: str = "ingatan"
+    pertanyaan: str
+    opsi: list[QuestionOptionInfo] = []
+    pembahasan: str = ""
+    urutan: int = 0
+
+
+class ConceptQuestionsResponse(BaseModel):
+    """Response for POST /concepts/questions."""
+    content_id: str
+    section_id: int | None = None
+    questions: list[ConceptQuestionInfo] = []
+    konsep_gagal: list[str] = []
+
+
+# --- Unggah latar belakang, berkas terindeks, riwayat ----------------------
+class UploadJobResponse(BaseModel):
+    """Response for POST /documents/upload/background — indexing belum selesai."""
+    job_id: str
+    status: str
+
+
+class UploadJobStatusResponse(BaseModel):
+    """Response for GET /documents/upload/background/{job_id}."""
+    job_id: str
+    status: str  # pending | running | done | error
+    result: IndexResponse | None = None
+    error: str | None = None
+
+
+# --- Browse ---
+
+
+class ChatHistoryItem(BaseModel):
+    interaction_id: str | None = None
+    timestamp: str | None = None
+    session_id: str | None = None
+    content_id: str | None = None
+    student_name: str | None = None
+    user_id: int | None = None
+    question: str
+    answer: str
+    topik_utama: str | None = None
+    tipe_pertanyaan: str | None = None
+    sources: list[SourceInfo] = Field(default_factory=list)
+    recommendations: list[str] = Field(default_factory=list)
+    elapsed_seconds: float | None = None
+
+
+class ChatHistoryResponse(BaseModel):
+    items: list[ChatHistoryItem]
+    total: int
+    limit: int
+    offset: int
+
+
+class IndexedFileInfo(BaseModel):
+    """Satu berkas sebagaimana benar-benar tersimpan di indeks."""
+    content_id: str | None = None
+    section_id: int | None = None
+    source_file: str
+    chunks: int = 0
+
+
+class IndexedFilesResponse(BaseModel):
+    """Response for GET /documents/indexed."""
+    files: list[IndexedFileInfo] = []
+    total_files: int = 0
+    total_chunks: int = 0

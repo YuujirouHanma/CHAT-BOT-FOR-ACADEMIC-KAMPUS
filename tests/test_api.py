@@ -442,3 +442,71 @@ class TestContextualFollowups:
             "apa itu tabel?",
             "Jawaban dari pipeline.",
         ]
+
+class TestMingguDariPortal:
+    """Minggu harus sampai ke indeks apa pun nama medan yang dipakai pemanggil.
+
+    Portal kampus memakai kosakata LMS (`section_id`); payload indeks dan
+    seluruh jalur pencarian memakai `week`. Sebelum perbaikan ini, `/upload`
+    hanya mengenal `week` sementara `/upload/background` hanya mengenal
+    `section_id` — padahal rag_upload_service.php mengirim `section_id` ke
+    `/upload`.
+
+    Akibatnya tidak terlihat sama sekali dari sisi pengunggah: berkasnya
+    terindeks, 201, tanpa peringatan. Yang hilang baru terasa jauh kemudian —
+    "minggu aktif" tidak menyaring apa pun, katalog minggu kosong, dan evaluasi
+    atas rentang minggu tidak menemukan materi.
+    """
+
+    @staticmethod
+    def _minggu_terkirim(client: TestClient) -> object:
+        return client.mock_pipeline.index_document.await_args.kwargs["week"]  # type: ignore[attr-defined]
+
+    def test_section_id_diterima_di_jalur_serentak(self, client: TestClient) -> None:
+        files = {"file": ("a.pdf", BytesIO(b"x"), "application/pdf")}
+        r = client.post(
+            "/documents/upload", files=files,
+            data={"content_id": "class-12", "section_id": "7"},
+        )
+        assert r.status_code == 201
+        assert self._minggu_terkirim(client) == 7, (
+            "section_id dari portal hilang diam-diam — materi terindeks tanpa minggu"
+        )
+
+    def test_week_tetap_diterima(self, client: TestClient) -> None:
+        files = {"file": ("a.pdf", BytesIO(b"x"), "application/pdf")}
+        r = client.post(
+            "/documents/upload", files=files,
+            data={"content_id": "class-12", "week": "3"},
+        )
+        assert r.status_code == 201
+        assert self._minggu_terkirim(client) == 3
+
+    def test_week_menang_bila_keduanya_dikirim(self, client: TestClient) -> None:
+        """`week` nama yang sebenarnya dipakai payload, jadi ia lebih spesifik."""
+        files = {"file": ("a.pdf", BytesIO(b"x"), "application/pdf")}
+        client.post(
+            "/documents/upload", files=files,
+            data={"content_id": "class-12", "week": "3", "section_id": "7"},
+        )
+        assert self._minggu_terkirim(client) == 3
+
+    def test_tanpa_keduanya_tetap_none(self, client: TestClient) -> None:
+        """Materi tanpa minggu itu keadaan yang sah, bukan galat."""
+        files = {"file": ("a.pdf", BytesIO(b"x"), "application/pdf")}
+        client.post("/documents/upload", files=files, data={"content_id": "class-12"})
+        assert self._minggu_terkirim(client) is None
+
+    def test_mata_kuliah_ikut_terkirim(self, client: TestClient) -> None:
+        """Tanpa ini nama mata kuliah di katalog jadi tebakan dari slug."""
+        files = {"file": ("a.pdf", BytesIO(b"x"), "application/pdf")}
+        client.post(
+            "/documents/upload", files=files,
+            data={
+                "content_id": "class-12", "course_id": "class-12",
+                "course_name": "Sistem Basis Data", "week": "2",
+            },
+        )
+        kw = client.mock_pipeline.index_document.await_args.kwargs  # type: ignore[attr-defined]
+        assert kw["course_id"] == "class-12"
+        assert kw["course_name"] == "Sistem Basis Data"

@@ -15,14 +15,22 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from src import guided, learning_styles
-from src.api.auth import assert_body_tenant, client_ip, request_id, tenant_chat
+from src.api.auth import (
+    assert_body_tenant,
+    client_ip,
+    request_id,
+    tenant_chat,
+    tenant_history_read,
+)
 from src.api.dependencies import get_pipeline
 from src.api.schemas import (
     Attachment,
     ChatContext,
+    ChatHistoryItem,
+    ChatHistoryResponse,
     ChoiceInfo,
     FeedbackRequest,
     QueryRequest,
@@ -31,7 +39,7 @@ from src.api.schemas import (
 )
 from src.api.session import Session, session_store
 from src.generation.notebook import build_notebook, safe_filename
-from src.hitl.logger import log_feedback
+from src.hitl.logger import log_feedback, read_conversation_logs
 from src.pipeline import RAGPipeline
 from src.security import audit
 from src.tenancy import TenantContext
@@ -172,7 +180,7 @@ async def _handle_quiz(
         return None  # belum pilih materi → biarkan alur guided menuntun dulu
 
     soal = await pipeline.quiz(
-        session.content_id, session.source_filter, model=body.model, tenant_id=tenant_id,
+        session.content_id, session.source_filter, model=body.kunci_model(), tenant_id=tenant_id,
     )
     if not soal:
         return _choices_reply(
@@ -207,17 +215,22 @@ async def ask_question(
     if body.course_id:
         tenant.require_course(body.course_id)
 
-    session = session_store.get_or_create(
-        body.session_id, tenant_id=tenant.tenant_id, student_id=body.student_id,
+    # Pengenal dan minggu dibaca lewat penyatu, bukan dari medannya langsung:
+    # portal kampus memakai `user_id` dan `section_ids`, sedangkan sisa kode di
+    # sini hanya mengenal `student_id` dan `weeks`.
+    session = await session_store.get_or_create(
+        body.session_id, tenant_id=tenant.tenant_id,
+        student_id=body.identitas_mahasiswa(),
     )
     session.record("user", body.question)
 
+    minggu = body.active_weeks()
     # Konteks yang dikirim eksplisit oleh klien menang atas hasil resolusi teks.
-    if any(v is not None for v in
-           (body.content_id, body.source_filter, body.course_id, body.week, body.weeks)):
+    if body.content_id is not None or body.source_filter is not None \
+            or body.course_id is not None or minggu:
         session.set_guided(
             course_id=body.course_id,
-            weeks=body.weeks or ([body.week] if body.week else None),
+            weeks=minggu or None,
             content_id=body.content_id,
             source_filter=body.source_filter,
         )
@@ -264,7 +277,7 @@ async def ask_question(
                     source_file=session.source_filter,
                     style=session.style,
                     awaiting=session.awaiting,
-                    model=body.model,
+                    model=body.kunci_model(),
                     tenant_id=tenant.tenant_id,
                     allowed_courses=tenant.allowed_courses,
                 )
@@ -283,7 +296,7 @@ async def ask_question(
             source_file=session.source_filter,
             style=session.style,
             awaiting=session.awaiting,
-            model=body.model,
+            model=body.kunci_model(),
             tenant_id=tenant.tenant_id,
             allowed_courses=tenant.allowed_courses,
         )
@@ -347,7 +360,7 @@ async def ask_question(
             content_id=session.content_id,
             source_filter=session.source_filter,
             session_id=session.session_id,
-            model=body.model,
+            model=body.kunci_model(),
             level=body.level,
             # Riwayat SEBELUM pertanyaan ini, supaya pertanyaan lanjutan
             # menyambung alur dan tidak mengulang yang sudah dibahas.
@@ -422,3 +435,55 @@ async def submit_feedback(
         comment=body.comment,
         tenant_id=tenant.tenant_id,
     )
+
+# --- Riwayat percakapan untuk portal kampus ---------------------------------
+# Berbeda dari /conversations yang melayani mahasiswa membaca percakapannya
+# sendiri, endpoint ini dipanggil portal untuk menampilkan riwayat pada
+# antarmuka dosen.
+
+
+@router.get("/history", response_model=ChatHistoryResponse)
+async def get_chat_history(
+    content_id: str | None = Query(default=None),
+    user_id: int | None = Query(
+        default=None,
+        description=(
+            "Batasi ke satu mahasiswa — kunci yang stabil, tidak seperti "
+            "student_name yang bisa diganti sendiri."
+        ),
+    ),
+    limit: int = Query(default=20, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    tenant: TenantContext = Depends(tenant_history_read),
+) -> ChatHistoryResponse:
+    """List logged chat interactions of the caller's campus, newest first.
+
+    Used by the teacher-facing chat history page — filter by content_id
+    (e.g. 'class-3') to scope to one class, by user_id to scope to one
+    student's own history, or omit both to see everything IN THIS CAMPUS.
+    """
+    records, total = read_conversation_logs(
+        content_id=content_id, user_id=user_id, limit=limit, offset=offset,
+        tenant_id=tenant.tenant_id,
+    )
+
+    items = [
+        ChatHistoryItem(
+            interaction_id=r.get("interaction_id"),
+            timestamp=r.get("timestamp"),
+            session_id=r.get("session_id"),
+            content_id=r.get("content_id"),
+            student_name=r.get("student_name"),
+            user_id=r.get("user_id"),
+            question=r.get("question", ""),
+            answer=r.get("answer", ""),
+            topik_utama=(r.get("decomposition") or {}).get("topik_utama"),
+            tipe_pertanyaan=(r.get("decomposition") or {}).get("tipe_pertanyaan"),
+            sources=[SourceInfo(**s) for s in (r.get("sources") or [])],
+            recommendations=r.get("recommendations") or [],
+            elapsed_seconds=r.get("elapsed_seconds"),
+        )
+        for r in records
+    ]
+
+    return ChatHistoryResponse(items=items, total=total, limit=limit, offset=offset)
