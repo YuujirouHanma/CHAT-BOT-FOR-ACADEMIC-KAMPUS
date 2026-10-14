@@ -8,6 +8,8 @@
     python -m scripts.tenantctl schedule <tenant_id>
     python -m scripts.tenantctl schedule <tenant_id> --set "4:kuis:1-4,7:ets:1-7"
     python -m scripts.tenantctl schedule <tenant_id> --reset
+    python -m scripts.tenantctl set-quota <tenant_id>
+    python -m scripts.tenantctl set-quota <tenant_id> [--rpm N] [--rpd N]
     python -m scripts.tenantctl revoke <tenant_id> <key_id>
     python -m scripts.tenantctl suspend <tenant_id>
     python -m scripts.tenantctl activate <tenant_id>
@@ -167,6 +169,59 @@ def cmd_schedule(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set_quota(args: argparse.Namespace) -> int:
+    """Tampilkan atau ubah kuota pemakaian satu kampus.
+
+    `tenant_store.set_quota` sudah ada sejak awal tetapi di repo ini tidak
+    pernah dapat dijangkau dari mana pun - tidak dari CLI, tidak dari API admin.
+    Satu-satunya cara menaikkan kuota sebuah kampus adalah menyunting berkas
+    JSON-nya dengan tangan di server, dan itu bukan sesuatu yang pantas
+    dilakukan saat satu kelas sedang tertolak di tengah ujicoba.
+
+    Kuota tersimpan PER KAMPUS di berkasnya, jadi mengubah nilai bawaan di
+    `TenantQuota` tidak menyentuh kampus yang sudah terdaftar - hanya yang
+    dibuat sesudahnya. Perintah ini yang mengurus sisanya.
+
+    Nama perintah dan nama bendera mengikuti salinan backend yang dipakai
+    deployment (`sevima-be/backend`), supaya operator tidak menghadapi dua nama
+    untuk satu pekerjaan yang sama.
+    """
+    perubahan: dict[str, int] = {}
+    for nama, nilai in (
+        ("requests_per_minute", args.rpm),
+        ("requests_per_day", args.rpd),
+        ("max_upload_mb", args.max_upload_mb),
+        ("max_storage_mb", args.max_storage_mb),
+    ):
+        if nilai is not None:
+            perubahan[nama] = nilai
+
+    if perubahan:
+        try:
+            tenant = tenant_store.set_quota(args.tenant_id, **perubahan)
+        except ValueError as exc:
+            print(f"Kuota tidak sah: {exc}", file=sys.stderr)
+            return 1
+    else:
+        tenant = tenant_store.get(args.tenant_id)
+
+    if tenant is None:
+        print("Tenant tidak ditemukan.", file=sys.stderr)
+        return 1
+
+    print(f"Kuota '{tenant.tenant_id}':")
+    for nama, nilai in tenant.quota.as_dict().items():
+        catatan = "  (0 = tanpa batas)" if nilai == 0 else ""
+        print(f"  {nama:<20} {nilai:>8,}{catatan}")
+
+    if perubahan:
+        # Pembatas laju menyimpan hitungannya per jendela menit; kuota baru
+        # berlaku pada jendela berikutnya, bukan menghapus penolakan yang
+        # sedang berjalan. Disebutkan supaya tidak dikira perintahnya gagal.
+        print("\nBerlaku pada jendela menit berikutnya (paling lama 60 detik).")
+    return 0
+
+
 def cmd_revoke(args: argparse.Namespace) -> int:
     if tenant_store.revoke_key(args.tenant_id, args.key_id):
         print(f"Kunci {args.key_id} dicabut.")
@@ -237,6 +292,14 @@ def main(argv: list[str] | None = None) -> int:
         "--reset", action="store_true", help="kembalikan ke jadwal bawaan",
     )
     j.set_defaults(fn=cmd_schedule)
+
+    q = sub.add_parser("set-quota", help="Lihat/ubah kuota pemakaian tenant")
+    q.add_argument("tenant_id")
+    q.add_argument("--rpm", type=int, help="permintaan per menit (0 = tanpa batas)")
+    q.add_argument("--rpd", type=int, help="permintaan per hari (0 = tanpa batas)")
+    q.add_argument("--max-upload-mb", type=int, help="batas ukuran satu unggahan")
+    q.add_argument("--max-storage-mb", type=int, help="batas total penyimpanan")
+    q.set_defaults(fn=cmd_set_quota)
 
     r = sub.add_parser("revoke", help="Cabut satu kunci")
     r.add_argument("tenant_id")

@@ -94,6 +94,20 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = True
     # Lapis kedua, per alamat IP: kuota kampus tidak menolong bila satu kunci bocor
     # lalu dipakai ramai-ramai dari satu mesin. 0 = tanpa batas per IP.
+    #
+    # PERHATIKAN TOPOLOGINYA SEBELUM MEMAKAI NILAI BAWAAN INI. Layanan ini
+    # dipanggil server-ke-server oleh portal PHP, bukan oleh peramban mahasiswa,
+    # jadi SELURUH lalu lintas - semua mahasiswa, semua kampus - datang dari satu
+    # alamat: alamat portalnya. Dengan `trust_proxy_headers` mati (bawaan, dan
+    # benar tanpa proxy tepercaya di depan), batas ini menjadi langit-langit
+    # tunggal bagi seluruh platform, bukan batas per pengguna.
+    #
+    # Terukur pada uji beban: satu ledakan 200 permintaan dari satu alamat
+    # dilayani 59, dan 81 di antaranya ditolak oleh lapis ini - bukan oleh kuota
+    # kampus. Karena itu nilainya harus disetel sebesar jumlah seluruh kuota
+    # kampus yang dilayani ditambah kelonggaran, dan compose menyetelnya
+    # eksplisit. Lihat `scripts/load_test.py --lapis kuota` untuk mengukurnya
+    # sendiri di pemasangan masing-masing.
     rate_limit_ip_per_minute: int = Field(default=120, ge=0, le=100_000)
     # Baca alamat asli dari X-Forwarded-For. Nyalakan HANYA bila ada proxy tepercaya
     # di depan yang MENIMPA header itu — kalau tidak, siapa pun dapat memalsukan

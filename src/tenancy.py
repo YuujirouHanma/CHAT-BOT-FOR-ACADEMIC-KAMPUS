@@ -134,9 +134,31 @@ class TenantQuota:
 
     Ada karena setiap pertanyaan memanggil LLM berbayar: tanpa batas, satu tenant
     yang salah membuat perulangan bisa menghabiskan tagihan seluruh layanan.
+
+    UKURANNYA DIHITUNG DARI SATU KAMPUS, BUKAN DARI SATU PENGGUNA
+    ------------------------------------------------------------
+    Yang dihitung pembatas laju adalah PERMINTAAN HTTP, sedangkan satu pertanyaan
+    mahasiswa memakai beberapa: di alur terpandu ia memilih mata kuliah, lalu
+    minggu, lalu materi, baru bertanya - masing-masing satu permintaan. Jadi
+    sekelas mahasiswa yang membuka chat bersamaan mengirim ratusan permintaan
+    dalam menit-menit pertama, bukan sejumlah orangnya.
+
+    Nilainya diselaraskan dengan salinan backend yang dipakai deployment
+    (`sevima-be/backend`), yang menurunkannya dari KAPASITAS.md: 300 mahasiswa
+    yang bertanya tiap dua menit sudah sekitar 150 pertanyaan/menit, belum
+    termasuk panggilan halaman (templat, petunjuk topik, cek status unggah).
+
+    Nilai lama di repo ini (60/menit) berasal dari taksiran "satu pertanyaan =
+    satu permintaan", dan uji beban memperlihatkan akibatnya: satu ledakan 200
+    permintaan dari satu kampus dilayani 59 - 60 ditolak kuota ini dan 81 oleh
+    lapis per-IP. Satu kelas sudah cukup untuk menyentuhnya.
+
+    Diubah per kampus lewat `python -m scripts.tenantctl set-quota`; kuota ini
+    kendali kewajaran pemakaian dan biaya, bukan pengaman akses - pengamannya
+    kunci API dan hak aksesnya.
     """
-    requests_per_minute: int = 60
-    requests_per_day: int = 5_000
+    requests_per_minute: int = 600
+    requests_per_day: int = 100_000
     max_upload_mb: int = 100
     max_storage_mb: int = 20_000
 
