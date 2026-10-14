@@ -133,3 +133,6 @@ sevima-be/
 .streamlit/secrets.toml
 .pypirc
 /site
+
+# Buku pemakaian token: data operasional, bukan kode.
+data/usage/

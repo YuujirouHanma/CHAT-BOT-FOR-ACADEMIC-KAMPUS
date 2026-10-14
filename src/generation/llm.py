@@ -21,7 +21,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from src import model_registry
+from src import model_registry, usage
 from src.config import MAX_GENERATION_TOKENS, settings
 from src.generation.bahasa import bersihkan_jawaban, buang_cjk, catat_kebocoran
 from src.generation.prompts import (
@@ -776,6 +776,10 @@ class LLMGenerator:
         # keluaran tak terpantau sama sekali, dan parse JSON yang gagal tidak bisa
         # dibedakan antara "model salah format" dan "kalimatnya terpotong di tengah".
         ringkasan = f"finish={alasan or '?'} | {_usage_summary(response)}"
+        # Dibukukan supaya pemakaian dapat DIJUMLAHKAN per kampus dan per
+        # bulan. Ringkasan di atas hanya teks log: cukup untuk menelusuri
+        # satu permintaan, tidak cukup untuk menjawab berapa biaya bulan ini.
+        usage.catat(getattr(response, "usage", None), model=model_id)
         content = (response.choices[0].message.content or "").strip()
 
         if alasan == "length":

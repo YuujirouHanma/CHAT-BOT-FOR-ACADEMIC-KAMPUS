@@ -27,6 +27,7 @@ from collections.abc import Awaitable, Callable
 from fastapi import Depends, HTTPException, Request, Security, status
 from fastapi.security import APIKeyHeader
 
+from src import usage
 from src.config import settings
 from src.security import audit
 from src.security.ratelimit import auth_throttle, limiter
@@ -174,6 +175,11 @@ async def require_tenant(
             )
 
     request.state.tenant = tenant
+    # Dipasang di sini, bukan di middleware: middleware berjalan sebelum kunci
+    # diverifikasi, sehingga belum tahu kampusnya. Dibaca jauh di dalam
+    # pipeline saat model dipanggil, tanpa perlu menambahkan `tenant_id` ke
+    # setiap tanda tangan fungsi di antaranya.
+    usage.pasang_tenant(tenant.tenant_id)
     return tenant
 
 

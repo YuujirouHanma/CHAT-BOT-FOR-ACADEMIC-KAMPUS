@@ -153,3 +153,20 @@ def override_tenant(
     yield tenant
     for dep in _auth_dependencies():
         app.dependency_overrides.pop(dep, None)
+
+
+@pytest.fixture(autouse=True)
+def _isolasi_buku_pemakaian(tmp_path_factory, monkeypatch):
+    """Alihkan buku pemakaian token ke direktori sementara selama pengujian.
+
+    Tanpa ini, setiap uji yang menyentuh jalur pemanggilan model menulis ke
+    `data/usage/` yang sungguhan. Akibatnya bukan sekadar berkas kotor: angka
+    pemakaian yang nanti dipakai menghitung biaya tercampur ratusan baris
+    bertenant kosong dari uji, dan tidak ada cara memisahkannya setelah
+    tercampur.
+    """
+    from src import usage
+
+    monkeypatch.setattr(
+        usage, "DIR_PEMAKAIAN", tmp_path_factory.mktemp("usage"),
+    )
