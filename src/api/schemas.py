@@ -897,9 +897,17 @@ class FileCoverage(BaseModel):
     Berkas dengan ``tercakup`` nol berarti dianggap tidak relevan oleh ekstraksi.
     Itu bisa benar (berkas nyasar) atau salah (materi yang terlewat), dan hanya
     dosen yang bisa membedakannya — karena itu angkanya ikut dikirim.
+
+    Tiga angka, bukan dua, karena ada dua penyusutan berurutan dan keduanya
+    perlu dibedakan: dari ``total`` potongan sebuah berkas, hanya ``dibaca``
+    yang disodorkan ke model (penyusunan peta dibatasi anggaran konteks), dan
+    dari yang dibaca itu hanya ``tercakup`` yang akhirnya dikutip sebuah konsep.
+    Menggabungkan keduanya membuat materi yang tidak pernah dibaca tidak dapat
+    dibedakan dari materi yang dibaca lalu dinilai tidak relevan.
     """
     source_file: str
     total: int
+    dibaca: int
     tercakup: int
 
 

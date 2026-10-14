@@ -72,7 +72,11 @@ async def preview_concepts(
     cakupan = [
         FileCoverage(
             source_file=berkas,
-            total=len(ids),
+            # `total` diambil dari seluruh potongan berkas itu; `dibaca` dari
+            # yang benar-benar disodorkan ke model. Keduanya sama bila materi
+            # minggu itu masih di bawah batas konteks.
+            total=peta.total_per_berkas.get(berkas, len(ids)),
+            dibaca=len(ids),
             tercakup=len(tercakup & set(ids)),
         )
         for berkas, ids in sorted(peta.chunk_per_berkas.items())

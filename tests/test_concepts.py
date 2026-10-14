@@ -226,6 +226,52 @@ class TestSusunPetaKonsep:
         # karena token berpikir berbagi jatah dengan keluaran JSON-nya.
         assert generator._call_with_retry.await_args.kwargs["reasoning"] is False
 
+        # Materi di bawah anggaran: yang dibaca = seluruhnya.
+        assert peta.total_per_berkas == {"a.pdf": 3}
+
+    async def test_materi_melebihi_anggaran_melaporkan_total_sebenarnya(self) -> None:
+        """Materi besar hanya dibaca sebagian, dan itu harus terlihat di angkanya.
+
+        Dulu cakupan dihitung dari peta potongan yang SUDAH tersaring
+        `pilih_merata`, sehingga berkas 150 potongan dilaporkan bertotal 60.
+        Angkanya terlihat masuk akal dan tidak pernah memicu galat, padahal
+        menyembunyikan satu-satunya hal yang perlu diketahui dosen: ada materi
+        yang tidak pernah dibaca model.
+        """
+        from src.indexing.concepts import MAKS_CHUNK_KONTEKS
+
+        jumlah = MAKS_CHUNK_KONTEKS * 2 + 30
+        store = AsyncMock()
+        store.scroll_all = AsyncMock(
+            return_value=[
+                {"chunk_id": f"c{i}", "payload": {
+                    "text": f"materi {i}",
+                    # Dua berkas supaya terbukti totalnya dihitung per berkas,
+                    # bukan satu angka untuk seluruh minggu lalu dibagi rata.
+                    "source_file": "a.pdf" if i % 2 == 0 else "b.pdf",
+                    "page_number": i + 1, "chunk_index": 0, "element_type": "text"}}
+                for i in range(jumlah)
+            ]
+        )
+        generator = AsyncMock()
+        generator._call_with_retry = AsyncMock(
+            return_value='[{"nama": "Konsep A", "deskripsi": "d", "potongan": [1]}]'
+        )
+
+        peta = await susun_peta_konsep(store, generator, "class-1", 3, tenant_id=T)
+
+        assert peta.jumlah_chunk == jumlah
+        assert peta.chunk_dipakai == MAKS_CHUNK_KONTEKS
+
+        # Total per berkas mengikuti materi yang SEBENARNYA ada...
+        assert sum(peta.total_per_berkas.values()) == jumlah
+        assert peta.total_per_berkas == {"a.pdf": (jumlah + 1) // 2, "b.pdf": jumlah // 2}
+
+        # ...sedangkan yang disodorkan ke model jauh lebih sedikit.
+        dibaca = sum(len(v) for v in peta.chunk_per_berkas.values())
+        assert dibaca == MAKS_CHUNK_KONTEKS
+        assert dibaca < sum(peta.total_per_berkas.values())
+
     async def test_keluaran_kacau_tidak_melempar(self) -> None:
         store = AsyncMock()
         store.scroll_all = AsyncMock(

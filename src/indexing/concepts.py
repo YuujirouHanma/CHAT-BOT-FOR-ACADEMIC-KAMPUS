@@ -85,6 +85,16 @@ class PetaKonsep(BaseModel):
     # berarti dianggap tidak relevan, dan hanya manusia yang bisa memutuskan
     # apakah itu benar (berkas nyasar) atau salah (materi terlewat).
     chunk_per_berkas: dict[str, list[str]] = Field(default_factory=dict)
+    # Jumlah potongan SEBENARNYA per berkas, dihitung dari seluruh materi minggu
+    # itu — bukan dari yang disodorkan ke model.
+    #
+    # Keduanya perlu ada karena `chunk_per_berkas` sudah tersaring oleh
+    # `pilih_merata`: begitu satu minggu punya lebih dari MAKS_CHUNK_KONTEKS
+    # potongan, isinya hanya cuplikan. Dulu cakupan dihitung dari peta itu saja,
+    # sehingga berkas 120 potongan dilaporkan bertotal 60 — angka yang terlihat
+    # masuk akal, tidak pernah memicu galat, dan menyembunyikan tepat satu hal
+    # yang perlu diketahui: separuh materinya tidak pernah dibaca model.
+    total_per_berkas: dict[str, int] = Field(default_factory=dict)
     keluaran_mentah: str = ""
 
 
@@ -326,6 +336,10 @@ async def susun_peta_konsep(
     for c in dipakai:
         per_berkas.setdefault(c["source_file"], []).append(c["chunk_id"])
 
+    total_berkas: dict[str, int] = {}
+    for c in chunks:
+        total_berkas[c["source_file"]] = total_berkas.get(c["source_file"], 0) + 1
+
     konsep = _rakit_konsep(_urai_json(mentah), dipakai)
     if not konsep:
         logger.warning(
@@ -341,5 +355,6 @@ async def susun_peta_konsep(
         chunk_dipakai=len(dipakai),
         berkas=berkas,
         chunk_per_berkas=per_berkas,
+        total_per_berkas=total_berkas,
         keluaran_mentah=mentah,
     )
