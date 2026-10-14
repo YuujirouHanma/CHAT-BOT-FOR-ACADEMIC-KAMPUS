@@ -233,14 +233,16 @@ class TestSusunPetaKonsep:
         """Materi besar hanya dibaca sebagian, dan itu harus terlihat di angkanya.
 
         Dulu cakupan dihitung dari peta potongan yang SUDAH tersaring
-        `pilih_merata`, sehingga berkas 150 potongan dilaporkan bertotal 60.
+        `pilih_merata`, sehingga berkas yang lebih besar dari anggaran dilaporkan
+        bertotal sebesar anggarannya saja.
         Angkanya terlihat masuk akal dan tidak pernah memicu galat, padahal
         menyembunyikan satu-satunya hal yang perlu diketahui dosen: ada materi
         yang tidak pernah dibaca model.
         """
-        from src.indexing.concepts import MAKS_CHUNK_KONTEKS
+        from src.config import settings
 
-        jumlah = MAKS_CHUNK_KONTEKS * 2 + 30
+        anggaran = settings.concept_max_chunks
+        jumlah = anggaran * 2 + 30
         store = AsyncMock()
         store.scroll_all = AsyncMock(
             return_value=[
@@ -261,7 +263,7 @@ class TestSusunPetaKonsep:
         peta = await susun_peta_konsep(store, generator, "class-1", 3, tenant_id=T)
 
         assert peta.jumlah_chunk == jumlah
-        assert peta.chunk_dipakai == MAKS_CHUNK_KONTEKS
+        assert peta.chunk_dipakai == anggaran
 
         # Total per berkas mengikuti materi yang SEBENARNYA ada...
         assert sum(peta.total_per_berkas.values()) == jumlah
@@ -269,7 +271,7 @@ class TestSusunPetaKonsep:
 
         # ...sedangkan yang disodorkan ke model jauh lebih sedikit.
         dibaca = sum(len(v) for v in peta.chunk_per_berkas.values())
-        assert dibaca == MAKS_CHUNK_KONTEKS
+        assert dibaca == anggaran
         assert dibaca < sum(peta.total_per_berkas.values())
 
     async def test_keluaran_kacau_tidak_melempar(self) -> None:

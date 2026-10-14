@@ -28,6 +28,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from src import usage
+from src.config import settings
 from src.generation.llm import LLMGenerator
 from src.storage.qdrant_store import QdrantStore
 from src.utils.logger import logger
@@ -39,11 +40,10 @@ from src.utils.logger import logger
 MIN_KONSEP = 3
 MAKS_KONSEP = 5
 
-# Anggaran konteks. Minggu tebal bisa punya ratusan chunk; yang tidak boleh
-# dilakukan adalah memotong ke N pertama, karena itu persis kesalahan yang
-# sedang diperbaiki. Bila melebihi anggaran, potongan diambil MERATA di seluruh
-# rentang materi sehingga cakupannya tetap utuh meski jumlahnya dibatasi.
-MAKS_CHUNK_KONTEKS = 60
+# Anggaran konteks ada di `settings.concept_max_chunks` — lihat src/config.py
+# untuk angka yang mendasarinya. Bila materi melebihi anggaran itu, potongan
+# diambil MERATA di seluruh rentang materi, bukan dipotong ke N pertama: yang
+# terakhir membuat konsep di paruh akhir materi tidak pernah terlihat.
 MAKS_KARAKTER_PER_CHUNK = 900
 
 _PAYLOAD_FIELDS = (
@@ -171,13 +171,18 @@ async def ambil_chunk_minggu(
     return chunks
 
 
-def pilih_merata(chunks: Sequence[dict], maks: int = MAKS_CHUNK_KONTEKS) -> list[dict]:
+def pilih_merata(chunks: Sequence[dict], maks: int | None = None) -> list[dict]:
     """Ambil paling banyak `maks` potongan, tersebar merata di seluruh materi.
 
     Dipakai hanya bila materi minggu itu melebihi anggaran konteks. Mengambil
     yang pertama akan membuat konsep di paruh akhir materi tidak pernah
     terlihat; mengambil merata menjaga cakupan seluruh rentang halaman.
+
+    `maks` kosong berarti memakai anggaran peta konsep dari setelan. Dibaca saat
+    dipanggil, bukan saat modul dimuat, supaya nilainya bisa diubah lewat
+    lingkungan tanpa menyentuh kode — dan supaya uji dapat menggesernya.
     """
+    maks = settings.concept_max_chunks if maks is None else maks
     jumlah = len(chunks)
     if jumlah <= maks:
         return list(chunks)

@@ -204,6 +204,39 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=20, ge=1, le=200)
     rerank_top_k: int = Field(default=5, ge=1, le=50)
 
+    # --- Peta konsep ---
+    # Berapa banyak potongan materi yang disodorkan ke model saat menyusun peta
+    # konsep satu minggu. Materi yang melebihinya diambil MERATA, bukan dipotong
+    # di awal — tetapi apa pun caranya, potongan yang tidak terpilih tidak pernah
+    # dibaca model, dan konsep yang hanya ada di sana tidak akan muncul.
+    #
+    # Dulu 60. Dilaporkan saat ujicoba kampus: peta konsep materi 120 halaman
+    # terasa tidak jadi, padahal setelah dipecah jadi 40 halaman berhasil.
+    # Terukur: keduanya berhasil, tetapi pada 120 halaman hanya separuh materi
+    # yang terbaca — dan itu yang membuat petanya terasa meleset.
+    #
+    # 300 dipilih dari angka yang diukur, bukan ditebak. Satu halaman materi
+    # kira-kira satu potongan, jadi 300 menutup minggu berisi tiga berkas enam
+    # puluh halaman dengan kelonggaran. Pada ~105 token per potongan, 300
+    # potongan berarti ~31.000 token masukan — jauh di bawah jendela model
+    # paling kecil di registry (128k), bahkan pada kasus terburuk ketika setiap
+    # potongan mentok 900 karakter.
+    #
+    # Terukur pada berkas uji 120 halaman, dari buku pemakaian token:
+    #
+    #   anggaran 60  : 8.879 token masuk, $0,00035 — 60 dari 120 potongan dibaca,
+    #                  15 dikutip konsep
+    #   anggaran 300 : 17.514 token masuk, $0,00063 — 120 dari 120 dibaca,
+    #                  90 dikutip konsep
+    #
+    # Jadi biayanya naik HANYA pada minggu yang materinya memang dibuang
+    # sebelumnya; minggu yang sudah di bawah anggaran tidak berubah sepeser pun.
+    # Dan itu dibayar ketika dosen menyusun ulang peta, bukan tiap pertanyaan
+    # mahasiswa. Cakupan sebenarnya selalu dilaporkan di balasan
+    # `/concepts/preview` (`total` lawan `dibaca`), jadi kalau satu minggu
+    # ternyata lebih tebal dari 300, kekurangannya terlihat tanpa perlu menebak.
+    concept_max_chunks: int = Field(default=300, ge=10, le=2000)
+
     # --- Chunking ---
     chunk_size: int = Field(default=512, ge=64, le=4096)
     chunk_overlap: int = Field(default=64, ge=0)
