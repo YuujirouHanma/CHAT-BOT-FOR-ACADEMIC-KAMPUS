@@ -27,6 +27,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src import usage
 from src.generation.llm import LLMGenerator
 from src.storage.qdrant_store import QdrantStore
 from src.utils.logger import logger
@@ -316,6 +317,7 @@ async def susun_peta_konsep(
     # reasoning=False: ini panggilan bantu di luar jalur jawaban mahasiswa, dan
     # token berpikir berbagi jatah dengan keluaran JSON-nya — lihat
     # src/generation/llm.py::_reasoning_body.
+    usage.pasang_tujuan("peta-konsep")
     mentah = await generator._call_with_retry(
         pesan, temperature=0.2, max_tokens=1500, reasoning=False
     )

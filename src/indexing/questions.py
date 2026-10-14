@@ -29,6 +29,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from src import usage
 from src.generation.llm import LLMGenerator
 from src.indexing.concepts import _susun_materi, ambil_chunk_minggu, pilih_merata
 from src.storage.qdrant_store import QdrantStore
@@ -312,6 +313,7 @@ async def _soal_satu_konsep(
     # max_tokens diskalakan dengan jumlah_soal: ~900 token/soal (empat pilihan
     # + pembahasan) plus sedikit ruang tetap, diukur dari bawaan 1800 token
     # untuk dua soal.
+    usage.pasang_tujuan("bank-soal")
     mentah = await generator._call_with_retry(
         pesan, temperature=0.3, max_tokens=200 + 900 * jumlah_soal, reasoning=False
     )

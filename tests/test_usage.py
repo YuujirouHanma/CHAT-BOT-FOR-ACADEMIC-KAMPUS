@@ -137,3 +137,52 @@ class TestTenantDariKonteks:
         """Panggilan dari skrip CLI tidak punya kampus; tetap dibukukan."""
         usage.catat(_usage(), model="qwen")
         assert usage.baca()[0]["tenant_id"] is None
+
+
+class TestTujuanTersambungKeJalurModel:
+    """Laporan menawarkan `--per tujuan`; tanpa uji ini opsi itu pernah kosong.
+
+    `pasang_tujuan` ada sejak awal tetapi tidak pernah dipanggil dari jalur
+    model mana pun, sehingga setiap baris tercatat `tujuan: null` dan
+    pengelompokan per tujuan menghasilkan satu kelompok "(tanpa)" berisi
+    semuanya. Fitur yang tampak tersedia padahal tidak - jenis cacat yang
+    paling lama tidak ketahuan, karena laporannya tetap jalan.
+    """
+
+    @pytest.mark.asyncio
+    async def test_penguraian_dan_jawaban_terpisah(self) -> None:
+        """Satu pertanyaan mahasiswa memanggil model tiga kali dengan tujuan beda.
+
+        Yang diperiksa di sini dua langkah yang paling menentukan biaya:
+        penguraian kueri (mekanis, murah) dan jawaban (mahal). Keduanya harus
+        muncul sebagai kelompok terpisah, bukan menyatu.
+        """
+        from src.generation.llm import LLMGenerator
+        from src.generation.prompts import FormattedContext
+
+        balasan = SimpleNamespace(
+            choices=[SimpleNamespace(
+                message=SimpleNamespace(content='{"query_diperkaya": "apa"}'),
+                finish_reason="stop",
+            )],
+            usage=_usage(100, 20),
+        )
+
+        async def create(**_: object) -> SimpleNamespace:
+            return balasan
+
+        klien = SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(create=create)),
+        )
+        gen = LLMGenerator(client=klien)  # type: ignore[arg-type]
+
+        await gen.decompose_query("apa itu primary key?")
+        await gen.generate("apa itu primary key?",
+                           FormattedContext(text_block="ctx", image_payloads=[]))
+
+        per_tujuan = usage.ringkas(usage.baca(), "tujuan")
+        assert set(per_tujuan) == {"penguraian", "jawaban"}, (
+            f"tujuan tidak terbawa ke buku pemakaian: {sorted(per_tujuan)}"
+        )
+        assert per_tujuan["penguraian"]["panggilan"] == 1
+        assert per_tujuan["jawaban"]["panggilan"] == 1

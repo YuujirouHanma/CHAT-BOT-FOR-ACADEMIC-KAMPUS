@@ -15,7 +15,7 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
-from src import learning_styles
+from src import learning_styles, usage
 from src.api.auth import request_id, tenant_chat
 from src.api.dependencies import get_pipeline, guard_material
 from src.api.schemas import (
@@ -124,6 +124,7 @@ async def get_topic_hints(
             f"tanpa nomor, tanpa penjelasan tambahan):\n\n{combined}"
         )
 
+        usage.pasang_tujuan("petunjuk-topik")
         raw_answer = await pipeline._generator._call_with_retry(
             [
                 {

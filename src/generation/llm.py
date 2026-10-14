@@ -319,6 +319,7 @@ class LLMGenerator:
             {"role": "user", "content": user_content},
         ]
 
+        usage.pasang_tujuan("jawaban")
         return bersihkan_jawaban(
             await self._call_with_retry(messages, model=model), dari="generate",
         )
@@ -346,6 +347,7 @@ class LLMGenerator:
             )},
         ]
         try:
+            usage.pasang_tujuan("penguraian")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.1,
                 max_tokens=_AUX_MAX_TOKENS, reasoning=False,
@@ -382,6 +384,7 @@ class LLMGenerator:
             {"role": "user", "content": prompt},
         ]
         try:
+            usage.pasang_tujuan("saran-lanjutan")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.5,
                 max_tokens=_AUX_MAX_TOKENS, reasoning=False,
@@ -407,6 +410,7 @@ class LLMGenerator:
             {"role": "user", "content": f"[ISI MATERI]\n{text}"},
         ]
         try:
+            usage.pasang_tujuan("ringkasan-minggu")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.2,
                 max_tokens=_AUX_MAX_TOKENS, reasoning=False,
@@ -439,6 +443,7 @@ class LLMGenerator:
             {"role": "user", "content": f"[ISI MATERI]\n{text}"},
         ]
         try:
+            usage.pasang_tujuan("pertanyaan-pembuka")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.4,
                 max_tokens=_AUX_MAX_TOKENS, reasoning=False,
@@ -464,6 +469,7 @@ class LLMGenerator:
             {"role": "user", "content": f"[ISI MATERI]\n{text}"},
         ]
         try:
+            usage.pasang_tujuan("kuis")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.3, max_tokens=_QUIZ_MAX_TOKENS
             )
@@ -496,6 +502,7 @@ class LLMGenerator:
             {"role": "user", "content": f"[ISI MATERI {range_text.upper()}]\n{text}"},
         ]
         try:
+            usage.pasang_tujuan("evaluasi")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.3, max_tokens=_EVAL_MAX_TOKENS,
             )
@@ -536,6 +543,7 @@ class LLMGenerator:
             {"role": "user", "content": "\n\n".join(bagian)},
         ]
         try:
+            usage.pasang_tujuan("penilaian")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.1, max_tokens=_REVIEW_MAX_TOKENS,
             )
@@ -581,6 +589,7 @@ class LLMGenerator:
             {"role": "user", "content": "\n\n".join(bagian)},
         ]
         try:
+            usage.pasang_tujuan("tinjauan-kode")
             raw = await self._call_with_retry(
                 messages, model=model, temperature=0.1, max_tokens=_REVIEW_MAX_TOKENS,
             )
@@ -659,6 +668,7 @@ class LLMGenerator:
             *trim_history(history),
             {"role": "user", "content": self._build_user_content(user_prompt, context)},
         ]
+        usage.pasang_tujuan("jawaban-terpandu")
         return bersihkan_jawaban(
             await self._call_with_retry(messages, model=model),
             dari="generate_with_custom_prompt",
@@ -691,6 +701,7 @@ class LLMGenerator:
         terkumpul = 0
         mentah: list[str] = []
         dibuang = 0
+        usage.pasang_tujuan("jawaban-terpandu")
         async for potongan in self._stream(messages, reasoning=True, model=model):
             terkumpul += len(potongan)
             mentah.append(potongan)
