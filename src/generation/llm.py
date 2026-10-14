@@ -206,6 +206,16 @@ class TruncatedGenerationError(GenerationError):
 # plafon terpisah, model bisa menghabiskan SELURUH jatah untuk berpikir lalu
 # mengembalikan isi kosong dengan finish_reason='length' — dan panggilan itu
 # tetap terbayar penuh.
+#
+# `reasoning=False` dipasang pada langkah MEKANIS saja: penguraian kueri, saran
+# pertanyaan lanjutan, ringkasan topik minggu, dan pertanyaan pembuka. Semuanya
+# ekstraksi atau penulisan ulang pendek yang tidak menjadi lebih baik karena
+# model berpikir lebih lama, sedangkan biayanya nyata — buku pemakaian token
+# mencatat 512 token penalaran di SETIAP panggilan, dan dua dari tiga panggilan
+# per pertanyaan mahasiswa adalah langkah bantu seperti ini.
+#
+# Generasi jawaban utama, penilaian jawaban terbuka, dan tinjauan kode sengaja
+# TETAP memakai reasoning: di sana kualitasnya memang bergantung pada itu.
 NO_REASONING_BODY: dict[str, Any] = {"reasoning": {"enabled": False}}
 
 
@@ -337,7 +347,8 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.1, max_tokens=_AUX_MAX_TOKENS
+                messages, model=model, temperature=0.1,
+                max_tokens=_AUX_MAX_TOKENS, reasoning=False,
             )
         except Exception as exc:
             logger.warning("Stage 1 decompose failed, falling back to raw question: {}", exc)
@@ -372,7 +383,8 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.5, max_tokens=_AUX_MAX_TOKENS
+                messages, model=model, temperature=0.5,
+                max_tokens=_AUX_MAX_TOKENS, reasoning=False,
             )
         except Exception as exc:
             logger.warning("Stage 5 follow-up generation failed: {}", exc)
@@ -396,7 +408,8 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.2, max_tokens=_AUX_MAX_TOKENS
+                messages, model=model, temperature=0.2,
+                max_tokens=_AUX_MAX_TOKENS, reasoning=False,
             )
         except Exception as exc:
             logger.warning("Ringkasan topik minggu gagal: {}", exc)
@@ -427,7 +440,8 @@ class LLMGenerator:
         ]
         try:
             raw = await self._call_with_retry(
-                messages, model=model, temperature=0.4, max_tokens=_AUX_MAX_TOKENS
+                messages, model=model, temperature=0.4,
+                max_tokens=_AUX_MAX_TOKENS, reasoning=False,
             )
         except Exception as exc:
             logger.warning("Starter question generation failed: {}", exc)
