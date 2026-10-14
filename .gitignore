@@ -136,3 +136,6 @@ sevima-be/
 
 # Buku pemakaian token: data operasional, bukan kode.
 data/usage/
+
+# Penanda perubahan katalog: keadaan jalan, bukan kode.
+data/catalog/

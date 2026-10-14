@@ -170,3 +170,27 @@ def _isolasi_buku_pemakaian(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(
         usage, "DIR_PEMAKAIAN", tmp_path_factory.mktemp("usage"),
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolasi_simpanan_katalog(tmp_path_factory, monkeypatch):
+    """Alihkan penanda katalog ke direktori sementara, dan kosongkan simpanannya.
+
+    Dua alasan terpisah. Pertama, tanpa pengalihan, uji menulis penanda ke
+    `data/catalog/` yang sungguhan dan membatalkan simpanan proses yang sedang
+    berjalan di mesin yang sama.
+
+    Kedua - dan ini yang membuatnya autouse - simpanannya hidup di tingkat
+    modul. Tanpa dikosongkan di antara uji, hasil daftar dari uji sebelumnya
+    masih tersimpan, dan uji berikutnya lulus tanpa benar-benar memanggil
+    penyimpanan. Kebocoran keadaan seperti itu membuat uji lulus justru ketika
+    kodenya rusak.
+    """
+    from src.storage import catalog_cache
+
+    monkeypatch.setattr(
+        catalog_cache, "DIR_PENANDA", tmp_path_factory.mktemp("catalog"),
+    )
+    catalog_cache.kosongkan()
+    yield
+    catalog_cache.kosongkan()

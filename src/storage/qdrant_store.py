@@ -43,12 +43,26 @@ from qdrant_client.http import models as qm
 
 from src.config import settings
 from src.schemas import Chunk
+from src.storage import catalog_cache
 from src.tenancy import TenantScopeError, require_tenant_id
 from src.utils.logger import logger
 
 _DENSE_VEC = "dense"
 _SPARSE_VEC = "sparse"
 _UPSERT_BATCH = 64
+
+
+def _salin(nilai: Any) -> Any:
+    """Salinan dangkal yang cukup untuk hasil katalog.
+
+    Hasil katalog hanya berbentuk daftar bilangan atau daftar dict satu lapis,
+    jadi satu lapis salinan sudah memutus kaitan ke isi simpanan. `deepcopy`
+    akan benar juga, tetapi membayar penelusuran rekursif untuk bentuk yang
+    sudah diketahui rata.
+    """
+    if isinstance(nilai, list):
+        return [dict(x) if isinstance(x, dict) else x for x in nilai]
+    return nilai
 
 # Field payload yang membawa pemilik data. Namanya dipakai juga sebagai kunci
 # indeks bertanda tenant di Qdrant.
@@ -239,6 +253,10 @@ class QdrantStore:
         logger.info(
             "Upserted {} points to '{}' (tenant={})", total, self._collection, tenant_id,
         )
+        # Daftar katalog yang tersimpan sudah tidak mewakili isi index lagi.
+        # Ditandai SETELAH penulisan berhasil: menandai lebih dulu akan
+        # membuang simpanan yang masih benar bila upsert-nya gagal.
+        catalog_cache.tandai_berubah(tenant_id)
         return total
 
     async def search(
@@ -362,6 +380,14 @@ class QdrantStore:
         by source_file. Returns list of {"source_file", "content_id"}.
         """
         tenant_id = require_tenant_id(tenant_id, operation="list_indexed_files")
+        return await self._tersimpan(
+            tenant_id, ("indexed-files", content_id),
+            lambda: self._hitung_indexed_files(content_id, tenant_id),
+        )
+
+    async def _hitung_indexed_files(
+        self, content_id: str | None, tenant_id: str,
+    ) -> list[dict]:
         qfilter = self._build_filter(tenant_id=tenant_id, content_id=content_id)
 
         seen: set[str] = set()
@@ -391,6 +417,24 @@ class QdrantStore:
             offset = next_offset
 
         return results
+
+    async def _tersimpan(
+        self, tenant_id: str, kunci: tuple, buat: Any,
+    ) -> Any:
+        """Jawab dari simpanan katalog bila masih sah; kalau tidak, hitung ulang.
+
+        Yang dikembalikan selalu salinan. Tanpa itu, pemanggil yang mengurutkan
+        atau menyaring hasilnya di tempat akan mengubah isi simpanan, dan
+        permintaan berikutnya menerima daftar yang sudah dipotong orang lain -
+        galat yang hanya muncul pada panggilan kedua dan seterusnya.
+        """
+        tersedia = catalog_cache.ambil(tenant_id, kunci)
+        if tersedia is not None:
+            return _salin(tersedia)
+
+        nilai = await buat()
+        catalog_cache.simpan(tenant_id, kunci, nilai)
+        return _salin(nilai)
 
     async def _scroll_payloads(
         self, fields: list[str], qfilter: qm.Filter,
@@ -427,9 +471,14 @@ class QdrantStore:
         and an auto-derived one, the custom name wins so the nice name isn't lost
         just because one week was uploaded without course_name.
         """
+        tenant_id = require_tenant_id(tenant_id, operation="list_courses")
+        return await self._tersimpan(
+            tenant_id, ("courses",), lambda: self._hitung_courses(tenant_id),
+        )
+
+    async def _hitung_courses(self, tenant_id: str) -> list[dict]:
         from src.catalog import humanize_course
 
-        tenant_id = require_tenant_id(tenant_id, operation="list_courses")
         payloads = await self._scroll_payloads(
             ["course_id", "course_name"], self._build_filter(tenant_id=tenant_id),
         )
@@ -451,6 +500,12 @@ class QdrantStore:
     async def list_weeks(self, course_id: str, *, tenant_id: str) -> list[int]:
         """Distinct weeks with indexed content for a course, ascending."""
         tenant_id = require_tenant_id(tenant_id, operation="list_weeks")
+        return await self._tersimpan(
+            tenant_id, ("weeks", course_id),
+            lambda: self._hitung_weeks(course_id, tenant_id),
+        )
+
+    async def _hitung_weeks(self, course_id: str, tenant_id: str) -> list[int]:
         qfilter = self._build_filter(tenant_id=tenant_id, course_id=course_id)
         payloads = await self._scroll_payloads(["week"], qfilter)
         weeks = {p["week"] for p in payloads if p.get("week") is not None}
@@ -465,6 +520,14 @@ class QdrantStore:
         picks; content_id is what /chat/ask needs.
         """
         tenant_id = require_tenant_id(tenant_id, operation="list_materials")
+        return await self._tersimpan(
+            tenant_id, ("materials", course_id, week),
+            lambda: self._hitung_materials(course_id, week, tenant_id),
+        )
+
+    async def _hitung_materials(
+        self, course_id: str, week: int, tenant_id: str,
+    ) -> list[dict]:
         qfilter = self._build_filter(
             tenant_id=tenant_id, course_id=course_id, weeks=[week],
         )
@@ -491,6 +554,16 @@ class QdrantStore:
         tenant_id = require_tenant_id(tenant_id, operation="list_materials_for_weeks")
         if not weeks:
             return []
+        # Minggu diurutkan di kunci supaya [3, 1] dan [1, 3] - permintaan yang
+        # sama persis - tidak menempati dua entri dan dua pemindaian.
+        return await self._tersimpan(
+            tenant_id, ("materials-weeks", course_id, tuple(sorted(weeks))),
+            lambda: self._hitung_materials_for_weeks(course_id, weeks, tenant_id),
+        )
+
+    async def _hitung_materials_for_weeks(
+        self, course_id: str, weeks: list[int], tenant_id: str,
+    ) -> list[dict]:
         qfilter = self._build_filter(
             tenant_id=tenant_id, course_id=course_id, weeks=weeks,
         )
@@ -714,6 +787,7 @@ class QdrantStore:
                 filter=self._build_filter(tenant_id=tenant_id, content_id=content_id)
             ),
         )
+        catalog_cache.tandai_berubah(tenant_id)
         logger.info(
             "Seluruh potongan content_id='{}' dihapus (tenant={})", content_id, tenant_id,
         )
@@ -743,6 +817,7 @@ class QdrantStore:
                 )
             ),
         )
+        catalog_cache.tandai_berubah(tenant_id)
         logger.info(
             "Potongan berkas '{}' dihapus (materi={}, tenant={})",
             source_file, content_id or "seluruhnya", tenant_id,
@@ -793,6 +868,7 @@ class QdrantStore:
             collection_name=self._collection,
             points_selector=qm.FilterSelector(filter=qfilter),
         )
+        catalog_cache.tandai_berubah(tenant_id)
         logger.info(
             "Membersihkan potongan basi source_file='{}' content_id={} (tenant={}), "
             "menyisakan {} potongan baru",
@@ -813,6 +889,7 @@ class QdrantStore:
                 filter=self._build_filter(tenant_id=tenant_id)
             ),
         )
+        catalog_cache.tandai_berubah(tenant_id)
         logger.warning("Seluruh data index tenant '{}' dihapus", tenant_id)
 
     @staticmethod
