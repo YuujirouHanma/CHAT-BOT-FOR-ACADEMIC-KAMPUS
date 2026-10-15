@@ -38,6 +38,7 @@ from src.indexing.summarizer import MultimodalSummarizer, enrich_elements
 from src.ingestion.parser import parse_document
 from src.ingestion.transcriber import is_media, parse_media
 from src.retrieval.hybrid_retriever import HybridRetriever
+from src.retrieval.relevansi import cukup_relevan
 from src.retrieval.reranker import Reranker
 from src.storage.qdrant_store import QdrantStore
 from src.tenancy import require_tenant_id
@@ -279,9 +280,23 @@ class RAGPipeline:
             query=enriched_query, content_id=content_id, source_filter=source_filter,
             course_id=course_id, weeks=weeks, tenant_id=tenant_id,
         )
-        if not results:
+        # Gerbang relevansi. Dulu hanya hasil KOSONG yang ditolak, dan dengan
+        # penyaring kampus yang selalu aktif itu hampir tak pernah terjadi —
+        # yang kembali potongan paling tidak buruk, serelevan apa pun. Lihat
+        # src/retrieval/relevansi.py untuk angka yang mendasari ambangnya.
+        #
+        # Ditutup DI SINI, sebelum generate(): pertanyaan yang tidak terjawab
+        # materi dulu tetap membakar dua panggilan model (jawaban + saran
+        # lanjutan) untuk menghasilkan satu kalimat penolakan.
+        if not results or not cukup_relevan(results):
             result = QueryResult(
-                answer="Materi yang tersedia tidak mencakup informasi tersebut.",
+                answer=await self._pesan_tak_terjawab(
+                    course_id=course_id, weeks=weeks, tenant_id=tenant_id,
+                ),
+                # Sumber TIDAK dilampirkan. Dulu penolakan tetap membawa lima
+                # berkas berskor 0,000, dan sitasi yang muncul di bawah jawaban
+                # "materi tidak mencakup" membuat mahasiswa meragukan seluruh
+                # sitasi — termasuk yang benar.
                 sources=[],
                 recommendations=[],
                 decomposition=dq,
@@ -1000,6 +1015,68 @@ class RAGPipeline:
             }
             for idx, r in enumerate(results)
         ]
+
+    async def _pesan_tak_terjawab(
+        self,
+        *,
+        course_id: str | None,
+        weeks: Sequence[int] | None,
+        tenant_id: str,
+    ) -> str:
+        """Penolakan yang menolong, disusun TANPA memanggil model.
+
+        Pesan lama satu kalimat datar: "Materi yang tersedia tidak mencakup
+        informasi tersebut." Benar, dan tidak berguna — mahasiswa tidak tahu
+        apakah ia salah mengeja, salah minggu, atau memang bertanya di luar
+        mata kuliahnya.
+
+        Tiga keterangan yang dapat diberikan gratis, karena semuanya ada di
+        katalog yang sudah tersimpan: bahwa Sevi hanya menjawab dari materi
+        kelas, minggu mana saja yang punya materi, dan berkas apa yang ada di
+        minggu yang sedang aktif. Memanggil model untuk menyusun saran
+        pertanyaan akan mengembalikan biaya yang baru saja dihemat oleh gerbang
+        relevansi, jadi tidak dilakukan.
+
+        Kegagalan membaca katalog tidak menggagalkan penolakan: yang
+        dikembalikan pesan dasarnya, bukan galat. Mahasiswa sedang menunggu
+        jawaban atas pertanyaannya, bukan laporan masalah internal.
+        """
+        dasar = (
+            "Sevi hanya menjawab dari materi yang diunggah dosen ke kelas ini, "
+            "dan tidak ada bagian materi yang menjawab pertanyaan itu."
+        )
+
+        if not course_id:
+            return dasar + " Coba periksa apakah mata kuliahnya sudah dipilih."
+
+        try:
+            tersedia = await self._store.list_weeks(course_id, tenant_id=tenant_id)
+        except Exception as exc:  # noqa: BLE001 - penolakan tetap harus terkirim
+            logger.warning("Katalog untuk pesan penolakan tidak terbaca: {}", exc)
+            return dasar
+
+        if not tersedia:
+            return (
+                dasar
+                + " Sampai sekarang belum ada materi terindeks untuk mata kuliah "
+                "ini, jadi belum ada yang bisa ditanyakan — tanyakan ke dosen "
+                "apakah materinya sudah diunggah."
+            )
+
+        daftar = ", ".join(str(m) for m in tersedia)
+        pesan = f"{dasar} Minggu yang sudah punya materi: {daftar}."
+
+        # Mempersempit minggu adalah sebab paling sering, dan satu-satunya yang
+        # bisa diperbaiki mahasiswa sendiri dalam satu klik.
+        aktif = [m for m in (weeks or []) if m is not None]
+        if aktif and not set(aktif).issuperset(set(tersedia)):
+            pesan += (
+                f" Kamu sedang membatasi pencarian ke minggu {', '.join(str(m) for m in aktif)}"
+                " — kalau topiknya ada di minggu lain, Sevi tidak akan melihatnya."
+                " Coba centang lebih banyak minggu."
+            )
+
+        return pesan
 
     @staticmethod
     def _pesan_tanpa_materi(topic: str, section_ids: Sequence[int] | None) -> str:

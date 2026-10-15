@@ -204,6 +204,13 @@ class Settings(BaseSettings):
     retrieval_top_k: int = Field(default=20, ge=1, le=200)
     rerank_top_k: int = Field(default=5, ge=1, le=50)
 
+    # Skor rerank minimum sebelum sebuah pertanyaan dianggap terjawab materi.
+    # Lihat src/retrieval/relevansi.py untuk pengukuran yang mendasarinya:
+    # pertanyaan di dalam materi berskor 0,937-0,960, di luar materi 0,000-0,001.
+    # Nilai 0 mematikan pemeriksaan (seluruh hasil dianggap layak) — untuk
+    # pemasangan yang rerankernya belum siap, supaya ia tidak menolak semuanya.
+    relevance_min_score: float = Field(default=0.15, ge=0.0, le=1.0)
+
     # --- Peta konsep ---
     # Berapa banyak potongan materi yang disodorkan ke model saat menyusun peta
     # konsep satu minggu. Materi yang melebihinya diambil MERATA, bukan dipotong

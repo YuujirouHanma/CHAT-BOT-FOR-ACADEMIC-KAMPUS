@@ -262,9 +262,56 @@ class TestQuery:
 
         result = await pipeline.query("Pertanyaan obscure?", tenant_id=TENANT)
 
-        assert "tidak mencakup" in result.answer
+        assert "hanya menjawab dari materi" in result.answer
         assert result.sources == []
         mocks["generator"].generate.assert_not_awaited()
+
+    async def test_hasil_ada_tapi_tidak_relevan_ditolak_tanpa_memanggil_model(
+        self,
+    ) -> None:
+        """Inti perbaikan: hasil TIDAK kosong, tetapi skornya nol.
+
+        Keadaan inilah yang dulu lolos. Penyaring kampus membuat pencarian
+        hampir selalu mengembalikan sesuatu — potongan paling tidak buruk —
+        sehingga pemeriksaan "kalau kosong, tolak" tidak pernah menyala, dan
+        keputusan menjawab-atau-menolak jatuh ke prompt.
+
+        Diukur di tumpukan sungguhan: pertanyaan di luar materi mengembalikan
+        lima sumber dengan skor rerank 0,000.
+        """
+        pipeline, mocks = _make_pipeline()
+        pipeline._retriever.retrieve = AsyncMock(return_value=[  # type: ignore[method-assign]
+            {"chunk_id": f"c{i}", "rerank_score": 0.0,
+             "payload": {"text": "t", "source_file": "a.pdf", "page_number": 1}}
+            for i in range(5)
+        ])
+
+        result = await pipeline.query("siapa presiden Indonesia?", tenant_id=TENANT)
+
+        mocks["generator"].generate.assert_not_awaited()
+        assert result.sources == [], (
+            "sitasi ikut terkirim pada jawaban yang tidak bersandar materi — "
+            "itu yang membuat mahasiswa meragukan seluruh sumber"
+        )
+        mocks["generator"].generate_followup.assert_not_awaited()
+
+    async def test_satu_potongan_relevan_sudah_cukup_untuk_dijawab(self) -> None:
+        """Skor reranker sangat berekor: pada pertanyaan yang jelas terjawab
+        materi, potongan terbaik 0,960 sementara yang kelima 0,011. Gerbang
+        memakai skor TERTINGGI, jadi ekor yang rendah tidak boleh menolak
+        pertanyaan yang benar."""
+        pipeline, mocks = _make_pipeline()
+        pipeline._retriever.retrieve = AsyncMock(return_value=[  # type: ignore[method-assign]
+            {"chunk_id": "c0", "rerank_score": 0.96,
+             "payload": {"text": "t", "source_file": "a.pdf", "page_number": 1}},
+            {"chunk_id": "c1", "rerank_score": 0.011,
+             "payload": {"text": "t", "source_file": "a.pdf", "page_number": 2}},
+        ])
+
+        result = await pipeline.query("apa itu INSERT?", tenant_id=TENANT)
+
+        mocks["generator"].generate.assert_awaited()
+        assert len(result.sources) == 2, "konteks ikut terpotong oleh gerbang"
 
     @pytest.mark.asyncio
     async def test_source_filter_passed_through(self) -> None:
