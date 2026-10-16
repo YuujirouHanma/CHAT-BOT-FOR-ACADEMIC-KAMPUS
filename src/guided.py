@@ -83,6 +83,30 @@ def _phrase_re(phrases: tuple[str, ...]) -> re.Pattern[str]:
 
 _NAV_RE = _phrase_re(_NAV_PHRASES)
 
+# Permintaan tentang MATERI-nya, bukan tentang sebuah topik di dalamnya:
+# "ringkas materi minggu 1", "materi minggu ini apa saja".
+#
+# Dipisah dari _QUESTION_WORDS yang jauh lebih luas: himpunan itu memuat "apa"
+# dan "bagaimana", yang juga ada di pertanyaan topikal biasa seperti "apa itu
+# primary key". Yang dibutuhkan di sini justru yang sempit.
+_IKHTISAR_PHRASES = ("ringkas", "ringkasan", "rangkum", "rangkuman", "ikhtisar")
+_IKHTISAR_RE = _phrase_re(_IKHTISAR_PHRASES)
+
+
+def minta_ikhtisar(text: str) -> bool:
+    """Mahasiswa meminta gambaran MATERI, bukan jawaban atas sebuah topik.
+
+    Dipakai untuk mengecualikan permintaan semacam ini dari gerbang relevansi
+    (lihat src/retrieval/relevansi.py). Alasannya terukur: "ringkas materi
+    minggu 1" mengambil materi minggu 1 yang BENAR, tetapi reranker memberinya
+    skor 0,009 — permintaan ringkasan tidak memuat kandungan topik untuk
+    dicocokkan, jadi kemiripan semantik tidak mengukur apa pun di sini.
+    Cakupannya sudah ditentukan penyaring minggu/materi, bukan oleh kemiripan.
+    """
+    bersih = _fold(text)
+
+    return bool(_IKHTISAR_RE.search(bersih) or _NAV_RE.search(bersih))
+
 # Pembuka niat belajar tanpa menyebut apa pun — layak dituntun dari langkah awal.
 _START_PHRASES = (
     "mau belajar", "ingin belajar", "pengen belajar", "belajar", "mulai",

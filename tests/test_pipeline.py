@@ -295,6 +295,43 @@ class TestQuery:
         )
         mocks["generator"].generate_followup.assert_not_awaited()
 
+    async def test_permintaan_ikhtisar_lolos_gerbang_walau_skornya_rendah(self) -> None:
+        """Regresi yang gerbang relevansi sempat buat, lalu ditutup.
+
+        "ringkas materi minggu 1" mengambil materi minggu 1 yang BENAR, tetapi
+        reranker memberinya 0,009 — permintaan ringkasan tidak memuat kandungan
+        topik untuk dicocokkan, jadi kemiripan semantik tidak mengukur apa pun.
+        Terukur di tumpukan sungguhan sebelum pengecualian ini dipasang: gerbang
+        menolaknya, padahal materinya sudah tepat di tangan.
+        """
+        pipeline, mocks = _make_pipeline()
+        pipeline._retriever.retrieve = AsyncMock(return_value=[  # type: ignore[method-assign]
+            {"chunk_id": "c0", "rerank_score": 0.009,
+             "payload": {"text": "t", "source_file": "a.pdf", "page_number": 1}},
+        ])
+
+        hasil = await pipeline.query("ringkas materi minggu 1", tenant_id=TENANT)
+
+        mocks["generator"].generate.assert_awaited()
+        assert hasil.sources, "permintaan ikhtisar ditolak gerbang relevansi"
+
+    async def test_pertanyaan_topikal_berskor_rendah_tetap_ditolak(self) -> None:
+        """Pengecualian ikhtisar tidak boleh menjadi lubang.
+
+        Skor sama rendahnya dengan uji di atas, tetapi pertanyaannya topikal —
+        di sini kemiripan MEMANG mengukur sesuatu, dan 0,009 berarti tidak ada
+        yang menjawab.
+        """
+        pipeline, mocks = _make_pipeline()
+        pipeline._retriever.retrieve = AsyncMock(return_value=[  # type: ignore[method-assign]
+            {"chunk_id": "c0", "rerank_score": 0.009,
+             "payload": {"text": "t", "source_file": "a.pdf", "page_number": 1}},
+        ])
+
+        await pipeline.query("siapa presiden Indonesia?", tenant_id=TENANT)
+
+        mocks["generator"].generate.assert_not_awaited()
+
     async def test_satu_potongan_relevan_sudah_cukup_untuk_dijawab(self) -> None:
         """Skor reranker sangat berekor: pada pertanyaan yang jelas terjawab
         materi, potongan terbaik 0,960 sementara yang kelima 0,011. Gerbang

@@ -288,7 +288,14 @@ class RAGPipeline:
         # Ditutup DI SINI, sebelum generate(): pertanyaan yang tidak terjawab
         # materi dulu tetap membakar dua panggilan model (jawaban + saran
         # lanjutan) untuk menghasilkan satu kalimat penolakan.
-        if not results or not cukup_relevan(results):
+        # Permintaan ikhtisar dikecualikan: cakupannya sudah ditentukan
+        # penyaring minggu/materi, bukan oleh kemiripan. Terukur — "ringkas
+        # materi minggu 1" mengambil materi minggu 1 yang BENAR lalu diberi
+        # skor 0,009 oleh reranker, karena permintaan ringkasan tidak memuat
+        # kandungan topik untuk dicocokkan. Tanpa pengecualian ini, gerbang
+        # menolak permintaan yang materinya justru sudah tepat di tangan.
+        ikhtisar = guided.minta_ikhtisar(question)
+        if not results or (not ikhtisar and not cukup_relevan(results)):
             result = QueryResult(
                 answer=await self._pesan_tak_terjawab(
                     course_id=course_id, weeks=weeks, tenant_id=tenant_id,

@@ -21,6 +21,7 @@ def _result(
     text: str = "",
     source_file: str = "doc.pdf",
     page_number: int | None = 1,
+    week: int | None = None,
     raw_html: str | None = None,
     image_base64: str | None = None,
 ) -> dict:
@@ -33,6 +34,7 @@ def _result(
             "element_type": element_type,
             "source_file": source_file,
             "page_number": page_number,
+            "week": week,
             "raw_html": raw_html,
             "image_base64": image_base64,
         },
@@ -54,6 +56,33 @@ class TestFormatRetrievalResults:
         assert "hal. 3" in ctx.text_block
         assert "Hello world." in ctx.text_block
         assert ctx.image_payloads == []
+
+    def test_minggu_lms_masuk_ke_header_sumber(self) -> None:
+        """Nomor minggu harus terbaca model, bukan hanya nama berkas.
+
+        Isi materi sering menyebut nomor pertemuan yang BERBEDA dari slot tempat
+        ia diarsipkan — dosen memakai ulang slide antar semester, sehingga
+        "Materi SBD TM9.pptx" bisa duduk di minggu 1. Tanpa minggu di header,
+        model hanya punya nomor dari judul dan isinya, lalu membantah mahasiswa
+        yang menyebut "minggu 1". Terukur sebelum perbaikan: jawabannya dibuka
+        dengan "Materi Minggu 9 (bukan Minggu 1)" lalu tetap menjawab.
+        """
+        results = [_result(
+            text="isi", source_file="Materi SBD TM9(Materi).pptx",
+            page_number=4, week=1,
+        )]
+        ctx = format_retrieval_results(results)
+
+        assert "minggu 1" in ctx.text_block, (
+            "minggu LMS tidak sampai ke model; ia hanya melihat judul 'TM9'"
+        )
+
+    def test_tanpa_minggu_header_tidak_menyebut_minggu(self) -> None:
+        """Materi lama bisa terindeks tanpa minggu. Menulis "minggu None" di
+        header akan membuat model mengarang nomor, jadi medannya dilewati."""
+        ctx = format_retrieval_results([_result(text="isi", week=None)])
+
+        assert "minggu" not in ctx.text_block.lower()
 
     def test_table_chunk_includes_raw_html(self) -> None:
         results = [

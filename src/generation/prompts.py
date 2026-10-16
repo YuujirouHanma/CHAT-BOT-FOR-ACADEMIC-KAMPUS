@@ -20,11 +20,12 @@ from src.utils.logger import logger
 SYSTEM_PROMPT = """Anda adalah asisten pembelajaran untuk mahasiswa. Tugas Anda:
 
 1. Menjawab pertanyaan HANYA berdasarkan konteks materi yang diberikan.
-2. Jika konteks tidak cukup, katakan dengan jujur: "Materi yang tersedia tidak mencakup informasi tersebut."
+2. Jawab bagian yang DIDUKUNG konteks, dan berhenti di situ. Jangan menambahkan dugaan, dan jangan membuka jawaban dengan sanggahan — relevansi konteks sudah diperiksa sebelum Anda dipanggil, jadi kalau konteks sampai kepada Anda, ada yang bisa dijawab. Bila hanya sebagian pertanyaan terjawab, jawab bagian itu lalu sebutkan singkat bagian mana yang tidak ada di materi.
 3. Untuk pertanyaan yang melibatkan tabel atau gambar, baca data mentah yang disertakan dan kutip angka secara presisi.
 4. Sebutkan sumber di setiap klaim penting dengan format [Sumber N], di mana N adalah nomor sumber yang Anda kutip.
 5. Gunakan bahasa Indonesia yang jelas dan akademis. Jangan mengulang pertanyaan.
-6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat."""
+6. Jika ada angka, formula, atau definisi penting, sajikan dengan tepat.
+7. Nomor minggu di header sumber ("minggu 3") adalah slot tempat dosen mengarsipkan materi itu, dan ITULAH yang dimaksud mahasiswa saat menyebut "minggu N". Judul atau isi materi kadang menyebut nomor pertemuan yang berbeda, karena dosen memakai ulang slide antar semester. Jangan membantah nomor yang disebut mahasiswa dan jangan membahas selisihnya; jawab saja dari materi yang diberikan."""
 
 
 # Kedalaman jawaban — ditambahkan ke SYSTEM_PROMPT.
@@ -262,7 +263,16 @@ def format_retrieval_results(results: list[dict]) -> FormattedContext:
         source_file = payload.get("source_file", "unknown")
         page = payload.get("page_number")
         page_str = f", hal. {page}" if page is not None else ""
-        header = f"[Sumber {idx}] {source_file}{page_str}"
+        # Minggu LMS ikut di header karena isi materi sering menyebut nomor
+        # pertemuan yang BERBEDA dari slot tempat ia diarsipkan: dosen memakai
+        # ulang slide antar semester, sehingga "Materi SBD TM9.pptx" bisa duduk
+        # di minggu 1. Tanpa keterangan ini model hanya punya nomor dari judul
+        # dan isinya, lalu membantah mahasiswa yang menyebut "minggu 1" —
+        # terukur: jawabannya dibuka dengan "Materi Minggu 9 (bukan Minggu 1)"
+        # lalu tetap menjawab, dan itulah keluhan "jawaban tidak konsisten".
+        week = payload.get("week")
+        week_str = f", minggu {week}" if week is not None else ""
+        header = f"[Sumber {idx}] {source_file}{page_str}{week_str}"
 
         if element_type == ElementType.TABLE.value and payload.get("raw_html"):
             block = (
