@@ -40,6 +40,7 @@ from src.ingestion.transcriber import is_media, parse_media
 from src.retrieval.hybrid_retriever import HybridRetriever
 from src.retrieval.relevansi import cukup_relevan
 from src.retrieval.reranker import Reranker
+from src.retrieval.saran import saring_saran
 from src.storage.qdrant_store import QdrantStore
 from src.tenancy import require_tenant_id
 from src.utils.logger import logger
@@ -336,6 +337,16 @@ class RAGPipeline:
         # Stage 5: generate follow-up questions as a separate call from the main answer.
         recommendations = await self._generator.generate_followup(
             question, dq, answer, model=model, history=history,
+        )
+        # Stage 5b: buang saran yang materinya tidak akan bisa menjawab.
+        # Promptnya tidak pernah melihat materi, jadi sebagian saran benar
+        # secara akademis tetapi tidak ada di berkas dosen — dan mahasiswa yang
+        # mengkliknya menerima penolakan dari sistem yang baru menyarankannya.
+        # Penyaring yang dipakai sama dengan pertanyaan ini supaya yang diperiksa
+        # benar-benar pencarian yang akan dijalankan saat saran itu diklik.
+        recommendations = await saring_saran(
+            recommendations, retriever=self._retriever, content_id=content_id,
+            course_id=course_id, weeks=weeks, tenant_id=tenant_id,
         )
 
         interaction_id = log_interaction(
@@ -644,6 +655,14 @@ class RAGPipeline:
 
         questions = await self._generator.generate_starter_questions(
             text, model=model, style_hint=spec.starter_hint,
+        )
+        # Disaring SEBELUM disimpan, bukan sesudah dibaca: dengan begitu biaya
+        # pemeriksaannya dibayar sekali per materi, dan cache tidak pernah berisi
+        # pertanyaan yang sudah diketahui tak terjawab. Dibatasi ke berkas ini
+        # saja — pertanyaan pembuka memang ditawarkan dalam konteks satu materi.
+        questions = await saring_saran(
+            questions, retriever=self._retriever, content_id=content_id,
+            source_filter=source_file, tenant_id=tenant_id,
         )
         if questions:
             gen_cache.save(
@@ -1198,6 +1217,10 @@ class RAGPipeline:
 
         try:
             rekomendasi = await tugas_rekomendasi
+            rekomendasi = await saring_saran(
+                rekomendasi, retriever=self._retriever, content_id=content_id,
+                weeks=section_ids, tenant_id=tenant_id,
+            )
         except Exception as exc:  # noqa: BLE001 - rekomendasi bukan alasan menggagalkan jawaban
             logger.warning("Rekomendasi gagal dibuat: {}", exc)
             rekomendasi = []
@@ -1349,6 +1372,16 @@ class RAGPipeline:
             ),
         )
         t_generate = time.monotonic() - t_stage
+        # Disaring setelah gather, bukan di dalamnya: pemeriksaannya butuh
+        # pencarian, dan menjalankannya bersamaan dengan pencarian jawaban hanya
+        # memperebutkan reranker yang sama tanpa menghemat waktu.
+        recommendations = await _timed(
+            "validasi_saran",
+            saring_saran(
+                recommendations, retriever=self._retriever, content_id=content_id,
+                weeks=section_ids, tenant_id=tenant_id,
+            ),
+        )
 
         logger.info(
             "TIMING guided_query | retrieve={:.1f}s generate={:.1f}s total={:.1f}s "

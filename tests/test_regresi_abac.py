@@ -24,6 +24,7 @@ from src.config import settings
 from src.pipeline import RAGPipeline
 from src.schemas import Chunk, ElementType
 from src.storage import content_store, tenant_store
+from tests.conftest import RetrieverPalsu
 from src.storage.qdrant_store import QdrantStore
 from src.tenancy import ALL_SCOPES
 
@@ -103,6 +104,7 @@ def dunia(monkeypatch: pytest.MonkeyPatch):
         def __init__(self) -> None:
             self._store = store
             self._generator = GeneratorPalsu()
+            self._retriever = RetrieverPalsu()
 
         async def index_document(self, *a, **kw):
             raise RuntimeError("psycopg2.OperationalError di /var/lib/rahasia")

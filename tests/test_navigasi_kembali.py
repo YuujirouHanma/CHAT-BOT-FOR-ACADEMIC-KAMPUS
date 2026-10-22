@@ -10,6 +10,7 @@ import pytest
 
 from src import guided
 from src.api.session import Session
+from tests.conftest import RetrieverPalsu
 
 TENANT = "kampus-uji"
 
@@ -158,6 +159,7 @@ class TestLewatRuteSungguhan:
             def __init__(self):
                 self._store = StorePalsu()
                 self._generator = GeneratorPalsu()
+                self._retriever = RetrieverPalsu()
 
         app.dependency_overrides[get_pipeline] = lambda: PipelinePalsu()
         yield TestClient(app)
@@ -254,6 +256,7 @@ class TestPemilihanGayaLewatRute:
             def __init__(self):
                 self._store = StorePalsu()
                 self._generator = GeneratorPalsu()
+                self._retriever = RetrieverPalsu()
 
             async def query(self, *a, **kw):        # noqa: D102
                 raise AssertionError(

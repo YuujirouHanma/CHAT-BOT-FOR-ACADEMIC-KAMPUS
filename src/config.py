@@ -211,6 +211,26 @@ class Settings(BaseSettings):
     # pemasangan yang rerankernya belum siap, supaya ia tidak menolak semuanya.
     relevance_min_score: float = Field(default=0.15, ge=0.0, le=1.0)
 
+    # --- Validasi saran pertanyaan ---
+    # Ambang yang dipakai memutuskan apakah sebuah SARAN pertanyaan layak
+    # ditampilkan. Lihat src/retrieval/saran.py untuk alasannya; ringkasnya,
+    # saran lanjutan dibuat tanpa model pernah melihat materinya, jadi sebagian
+    # di antaranya memang tidak terjawab.
+    #
+    # Bawaannya SAMA dengan `relevance_min_score`, dan itu disengaja: asasnya
+    # "kita hanya menyarankan apa yang memang akan kita jawab". Dibuat setelan
+    # terpisah supaya ambang saran bisa dinaikkan (lebih sedikit saran, tetapi
+    # lebih yakin terjawab) tanpa ikut mengubah ambang menjawab — menaikkan
+    # `relevance_min_score` akan menolak pertanyaan mahasiswa, bukan saran.
+    #
+    # Nilai 0 mematikan pemeriksaan: daftar saran dikembalikan apa adanya dan
+    # tidak ada satu pun pencarian tambahan dijalankan.
+    suggestion_min_score: float = Field(default=0.15, ge=0.0, le=1.0)
+    # Lebar pencarian saat MEMERIKSA saran, bukan saat menjawab. Lebih sempit
+    # dari `retrieval_top_k` karena yang dicari hanya ada-tidaknya satu potongan
+    # yang menjawab — bukan daftar untuk dibaca model.
+    suggestion_check_top_k: int = Field(default=10, ge=1, le=200)
+
     # --- Peta konsep ---
     # Berapa banyak potongan materi yang disodorkan ke model saat menyusun peta
     # konsep satu minggu. Materi yang melebihinya diambil MERATA, bukan dipotong

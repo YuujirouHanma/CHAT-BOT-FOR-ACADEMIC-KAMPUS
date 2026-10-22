@@ -194,3 +194,31 @@ def _isolasi_simpanan_katalog(tmp_path_factory, monkeypatch):
     catalog_cache.kosongkan()
     yield
     catalog_cache.kosongkan()
+
+
+class RetrieverPalsu:
+    """Retriever sekadar-cukup untuk fixture pipeline yang tidak menguji pencarian.
+
+    Ada karena `starter_questions()` dan jalur saran lanjutan sekarang MEMERIKSA
+    tiap saran ke materi lewat `src/retrieval/saran.py`, jadi pipeline palsu yang
+    hanya membawa store dan generator kehilangan `_retriever` dan gagal dengan
+    AttributeError - kegagalan fixture, bukan kegagalan kode.
+
+    Bawaannya mengembalikan satu potongan berskor TINGGI, yang berarti "materi
+    bisa menjawab ini". Itu keadaan yang benar untuk uji-uji tersebut: mereka
+    menguji alur navigasi dan hak akses, bukan penyaringan saran. Uji yang
+    memang menguji penyaringan menyetel `skor` sendiri.
+    """
+
+    def __init__(self, skor: float = 0.95) -> None:
+        self.skor = skor
+        self.panggilan: list[str] = []
+
+    async def retrieve(self, query: str, *a, **kw) -> list[dict]:
+        self.panggilan.append(query)
+        return [{
+            "chunk_id": "palsu-1",
+            "score": self.skor,
+            "rerank_score": self.skor,
+            "payload": {"text": "isi materi palsu", "source_file": "palsu.pdf"},
+        }]
