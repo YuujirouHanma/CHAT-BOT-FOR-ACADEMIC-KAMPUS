@@ -1023,6 +1023,48 @@ class ChatHistoryResponse(BaseModel):
     offset: int
 
 
+class HitungNama(BaseModel):
+    """Satu nama beserta berapa kali ia muncul (topik, berkas, jenis)."""
+    nama: str
+    jumlah: int
+
+
+class PertanyaanBerulang(BaseModel):
+    """Pertanyaan yang ditanyakan oleh beberapa MAHASISWA BERBEDA.
+
+    `mahasiswa` menghitung orang, bukan pengulangan: satu mahasiswa yang
+    bertanya lima kali sedang kesulitan sendiri, sedangkan lima mahasiswa yang
+    bertanya hal sama menunjuk ke materinya.
+    """
+    pertanyaan: str
+    mahasiswa: int
+
+
+class ChatHistorySummaryResponse(BaseModel):
+    """Ringkasan riwayat chat satu kelas untuk dosen.
+
+    Semua angka di sini dihitung di kode (src/hitl/ringkasan.py); `ringkasan`
+    adalah satu-satunya medan yang ditulis model. Bila pemanggilan model gagal,
+    `ringkasan` kosong dan sisanya tetap terkirim — dosen kehilangan narasinya,
+    bukan datanya.
+    """
+    ringkasan: str = ""
+    total_interaksi: int = 0
+    # Berapa yang BENAR-BENAR tersimpan, sebelum dibatasi `maks`. Dikirim supaya
+    # dosen tahu ringkasannya menutup sebagian atau seluruh riwayat.
+    total_tersimpan: int = 0
+    mahasiswa_unik: int = 0
+    sejak: str | None = None
+    hingga: str | None = None
+    tak_terjawab: int = 0
+    topik_teratas: list[HitungNama] = Field(default_factory=list)
+    materi_teratas: list[HitungNama] = Field(default_factory=list)
+    tipe_pertanyaan: list[HitungNama] = Field(default_factory=list)
+    contoh_tak_terjawab: list[str] = Field(default_factory=list)
+    pertanyaan_berulang: list[PertanyaanBerulang] = Field(default_factory=list)
+    dari_cache: bool = False
+
+
 class IndexedFileInfo(BaseModel):
     """Satu berkas sebagaimana benar-benar tersimpan di indeks."""
     content_id: str | None = None

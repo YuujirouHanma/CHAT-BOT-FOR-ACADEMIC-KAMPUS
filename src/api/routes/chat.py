@@ -31,6 +31,7 @@ from src.api.schemas import (
     ChatContext,
     ChatHistoryItem,
     ChatHistoryResponse,
+    ChatHistorySummaryResponse,
     ChoiceInfo,
     FeedbackRequest,
     QueryRequest,
@@ -487,3 +488,39 @@ async def get_chat_history(
     ]
 
     return ChatHistoryResponse(items=items, total=total, limit=limit, offset=offset)
+
+
+@router.get("/history/summary", response_model=ChatHistorySummaryResponse)
+async def get_chat_history_summary(
+    content_id: str | None = Query(default=None),
+    user_id: int | None = Query(
+        default=None,
+        description="Batasi ke satu mahasiswa; kosong = seluruh kelas.",
+    ),
+    maks: int = Query(
+        default=200, ge=1, le=1000,
+        description=(
+            "Berapa interaksi TERBARU yang dibaca. Membaca seluruh riwayat "
+            "setahun bukan yang dicari dosen yang sedang menyiapkan pertemuan "
+            "berikutnya, dan membuat satu klik membaca seluruh berkas log."
+        ),
+    ),
+    tenant: TenantContext = Depends(tenant_history_read),
+    pipeline: RAGPipeline = Depends(get_pipeline),
+) -> ChatHistorySummaryResponse:
+    """Ringkasan riwayat chat untuk dosen: apa yang ditanyakan, di mana macet.
+
+    Memakai hak yang SAMA dengan `/chat/history` (`conversation:read`) dan tidak
+    membuka apa pun yang belum bisa dibaca lewat endpoint itu — bedanya hanya
+    riwayat yang sama sudah dihitung dan dinarasikan. Menambahkan hak baru di
+    sini akan membuat ringkasan terkunci bagi portal yang riwayat mentahnya
+    justru sudah tampil.
+
+    Seluruh angka dihitung di kode; model hanya menulis `ringkasan`. Bila model
+    gagal dipanggil, `ringkasan` kosong dan angkanya tetap terkirim.
+    """
+    hasil = await pipeline.ringkasan_riwayat(
+        content_id=content_id, user_id=user_id, maks=maks,
+        tenant_id=tenant.tenant_id,
+    )
+    return ChatHistorySummaryResponse(**hasil)

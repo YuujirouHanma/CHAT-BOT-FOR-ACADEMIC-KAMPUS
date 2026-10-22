@@ -30,6 +30,7 @@ from src.generation.prompts import (
     FOLLOWUP_SYSTEM_PROMPT,
     GRADE_SYSTEM_PROMPT,
     QUIZ_SYSTEM_PROMPT,
+    RINGKASAN_RIWAYAT_SYSTEM_PROMPT,
     STARTER_SYSTEM_PROMPT,
     WEEK_TOPIC_SYSTEM_PROMPT,
     FormattedContext,
@@ -419,6 +420,39 @@ class LLMGenerator:
             logger.warning("Ringkasan topik minggu gagal: {}", exc)
             return ""
         return raw.strip().strip('"').split("\n")[0][:300]
+
+    async def summarize_chat_history(
+        self, bahan: str, model: str | None = None
+    ) -> str:
+        """Narasi untuk dosen dari fakta riwayat chat yang SUDAH dihitung.
+
+        `bahan` datang dari `src.hitl.ringkasan.susun_bahan()` — angka, bukan log
+        mentah. Pemisahan itu yang membuat panggilan ini murah dan biayanya tidak
+        tumbuh sebanding jumlah chat: 500 interaksi menghasilkan bahan yang
+        hampir sama besar dengan 50.
+
+        Mengembalikan "" bila gagal. Pemanggil tetap mengirim angkanya, jadi
+        dosen tidak kehilangan apa pun yang terhitung — hanya narasinya.
+        """
+        teks = (bahan or "").strip()
+        if not teks:
+            return ""
+        messages: list[Any] = [
+            {"role": "system", "content": RINGKASAN_RIWAYAT_SYSTEM_PROMPT},
+            {"role": "user", "content": f"[RANGKUMAN ANGKA]\n{teks}"},
+        ]
+        try:
+            usage.pasang_tujuan("ringkasan-riwayat")
+            raw = await self._call_with_retry(
+                messages, model=model, temperature=0.3,
+                # Lebih lapang dari _AUX_MAX_TOKENS: keluaran di sini beberapa
+                # paragraf, bukan satu JSON pendek.
+                max_tokens=1200, reasoning=False,
+            )
+        except Exception as exc:
+            logger.warning("Ringkasan riwayat chat gagal: {}", exc)
+            return ""
+        return raw.strip()
 
     async def generate_starter_questions(
         self, material_text: str, model: str | None = None,

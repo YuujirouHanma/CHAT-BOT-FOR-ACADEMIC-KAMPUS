@@ -5,10 +5,12 @@
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from src import evaluation as evaluation_mod
 from src import gen_cache, guided, learning_styles
@@ -25,7 +27,8 @@ from src.generation.exercise import (
 from src.generation.llm import LLMGenerator
 from src.generation.prompt_templates import build_guided_user_prompt
 from src.generation.prompts import format_retrieval_results
-from src.hitl.logger import log_interaction, log_quiz_attempt
+from src.hitl.logger import log_interaction, log_quiz_attempt, read_conversation_logs
+from src.hitl.ringkasan import hitung_fakta, susun_bahan
 from src.indexing.chunker import Chunker
 from src.indexing.concepts import (
     MAKS_KARAKTER_PER_CHUNK,
@@ -670,6 +673,88 @@ class RAGPipeline:
                 tenant_id=tenant_id, material_hash=sidik,
             )
         return questions
+
+    async def ringkasan_riwayat(
+        self,
+        *,
+        content_id: str | None = None,
+        user_id: int | None = None,
+        maks: int = 200,
+        model: str | None = None,
+        tenant_id: str,
+    ) -> dict:
+        """Ringkasan riwayat chat untuk dosen: angka dihitung, narasi ditulis model.
+
+        Lihat src/hitl/ringkasan.py untuk alasan pembagian itu. Di sini hanya
+        tiga hal yang ditambahkan: batas jumlah log yang dibaca, cache, dan
+        jaminan bahwa angkanya tetap terkirim walau narasinya gagal dibuat.
+
+        `maks` membatasi interaksi TERBARU yang dibaca. Tanpa batas, satu kelas
+        dengan riwayat setahun membuat satu klik dosen membaca seluruh berkas
+        log — dan angka setahun bukan yang dicari dosen yang sedang menyiapkan
+        pertemuan berikutnya.
+
+        Cache dikunci pada sidik jari BAHANNYA, bukan waktu kedaluwarsa. Jadi
+        ringkasan dipakai ulang tepat selama tidak ada chat baru yang mengubah
+        angkanya, dan terbit ulang pada chat pertama yang mengubahnya — tanpa
+        dosen perlu menebak kapan datanya segar.
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="ringkasan_riwayat")
+        records, total = await asyncio.to_thread(
+            read_conversation_logs,
+            content_id=content_id, user_id=user_id, limit=maks, offset=0,
+            tenant_id=tenant_id,
+        )
+        fakta = hitung_fakta(records)
+        bahan = susun_bahan(fakta)
+
+        hasil: dict[str, Any] = {
+            "ringkasan": "",
+            "total_interaksi": fakta.total,
+            "total_tersimpan": total,
+            "mahasiswa_unik": fakta.mahasiswa_unik,
+            "sejak": fakta.sejak,
+            "hingga": fakta.hingga,
+            "tak_terjawab": fakta.tak_terjawab,
+            "topik_teratas": [{"nama": t, "jumlah": n} for t, n in fakta.topik_teratas],
+            "materi_teratas": [
+                {"nama": m, "jumlah": n} for m, n in fakta.materi_teratas
+            ],
+            "tipe_pertanyaan": [
+                {"nama": t, "jumlah": n} for t, n in fakta.tipe_pertanyaan
+            ],
+            "contoh_tak_terjawab": fakta.contoh_tak_terjawab,
+            "pertanyaan_berulang": [
+                {"pertanyaan": t, "mahasiswa": n} for t, n in fakta.pertanyaan_berulang
+            ],
+        }
+
+        # Riwayat kosong tidak perlu — dan tidak boleh — memanggil model: tidak
+        # ada yang bisa diringkas, dan narasi yang dikarang dari nol justru
+        # terbaca seperti kesimpulan.
+        if fakta.total == 0:
+            return hasil
+
+        kunci_cache = f"{user_id if user_id is not None else 'semua'}::{maks}"
+        sidik = gen_cache.hash_material(bahan)
+        tersimpan = gen_cache.load(
+            "riwayat", content_id or "semua", kunci_cache,
+            tenant_id=tenant_id, material_hash=sidik,
+        )
+        if isinstance(tersimpan, str) and tersimpan:
+            hasil["ringkasan"] = tersimpan
+            hasil["dari_cache"] = True
+            return hasil
+
+        narasi = await self._generator.summarize_chat_history(bahan, model=model)
+        if narasi:
+            gen_cache.save(
+                "riwayat", content_id or "semua", kunci_cache, narasi,
+                tenant_id=tenant_id, material_hash=sidik,
+            )
+        hasil["ringkasan"] = narasi
+        hasil["dari_cache"] = False
+        return hasil
 
     async def quiz(
         self, content_id: str, source_file: str, model: str | None = None,

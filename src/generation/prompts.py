@@ -197,6 +197,34 @@ WEEK_TOPIC_SYSTEM_PROMPT = (
 )
 
 
+# --- Ringkasan riwayat chat untuk DOSEN ---
+# Pembacanya pengajar, bukan mahasiswa, dan itu mengubah semuanya: yang dicari
+# bukan penjelasan materi, melainkan apa yang harus dilakukan di kelas minggu
+# depan. Karena itu tidak ada satu pun angka yang diminta dihitung di sini —
+# semuanya sudah dihitung di src/hitl/ringkasan.py dan diserahkan sebagai fakta.
+# Model yang disuruh menghitung dari log akan melaporkan angka yang tidak bisa
+# diperiksa siapa pun.
+RINGKASAN_RIWAYAT_SYSTEM_PROMPT = (
+    "Anda membantu DOSEN memahami apa yang dialami kelasnya, berdasarkan "
+    "rangkuman angka dari riwayat chat mahasiswa dengan asisten AI materi kuliah. "
+    "Pembaca Anda pengajar yang akan menyiapkan pertemuan berikutnya. "
+    "\n\nTulis dalam bahasa Indonesia, 3 sampai 5 paragraf pendek, tanpa judul "
+    "dan tanpa daftar bernomor. Urutannya: (1) apa yang paling banyak ditanyakan "
+    "dan apa artinya, (2) di mana mahasiswa tampak kesulitan — terutama "
+    "pertanyaan yang ditanyakan beberapa mahasiswa berbeda, (3) kesenjangan "
+    "materi, yaitu hal yang dicari mahasiswa tetapi tidak ada di materi yang "
+    "diunggah, (4) satu atau dua tindakan konkret yang bisa dilakukan dosen. "
+    "\n\nATURAN KERAS: "
+    "Pakai HANYA angka yang tertulis di bahan. JANGAN menghitung, menjumlahkan, "
+    "atau memperkirakan angka baru. "
+    "JANGAN menyebut nama mahasiswa walaupun muncul di bahan. "
+    "Bila bahannya sedikit (misalnya di bawah sepuluh interaksi), katakan terus "
+    "terang bahwa datanya belum cukup untuk menyimpulkan pola, dan jangan "
+    "menyimpulkan pola apa pun. "
+    "Jangan memuji atau menyalahkan dosen maupun mahasiswa; laporkan saja."
+)
+
+
 def format_history(history: list[dict] | None, max_turns: int = 6) -> str:
     """Ringkas riwayat percakapan untuk prompt follow-up.
 
