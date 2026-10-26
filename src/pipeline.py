@@ -25,7 +25,10 @@ from src.generation.exercise import (
     parse_exercise_json,
 )
 from src.generation.llm import LLMGenerator
-from src.generation.prompt_templates import build_guided_user_prompt
+from src.generation.prompt_templates import (
+    TEMPLATE_TANPA_GERBANG,
+    build_guided_user_prompt,
+)
 from src.generation.prompts import format_retrieval_results
 from src.hitl.logger import log_interaction, log_quiz_attempt, read_conversation_logs
 from src.hitl.ringkasan import hitung_fakta, susun_bahan
@@ -110,6 +113,24 @@ def _umpan_balik_kode(nilai: dict) -> str:
     ]
     bagian += [f"Petunjuk: {p}" for p in nilai.get("petunjuk", [])]
     return "\n".join(bagian)
+
+
+def _bebas_gerbang(template_id: str | None, topic: str) -> bool:
+    """Apakah permintaan terpandu ini dikecualikan dari gerbang relevansi.
+
+    Dua sebab yang berbeda, keduanya bermuara pada hal yang sama: cakupannya
+    sudah ditentukan penyaring minggu/materi, bukan oleh kemiripan topik.
+
+    1. Templatenya memang meminta ringkasan materi yang sudah dipilih
+       (`TEMPLATE_TANPA_GERBANG`), tanpa menyebut topik apa pun.
+    2. Mahasiswa menuliskan sendiri permintaan ringkasan sebagai topik, lewat
+       jalur yang sama dengan chat bebas — jadi diperiksa dengan pengenal yang
+       sama, `guided.minta_ikhtisar`, bukan daftar kata kedua yang akan berbeda
+       pelan-pelan dari yang pertama.
+    """
+    if template_id and template_id in TEMPLATE_TANPA_GERBANG:
+        return True
+    return guided.minta_ikhtisar(topic)
 
 
 def _course_name(courses: list[dict], course_id: str) -> str:
@@ -300,6 +321,14 @@ class RAGPipeline:
         # menolak permintaan yang materinya justru sudah tepat di tangan.
         ikhtisar = guided.minta_ikhtisar(question)
         if not results or (not ikhtisar and not cukup_relevan(results)):
+            # Saran diambil dari MATERI, bukan dari pertanyaan yang baru ditolak.
+            # Dilaporkan dari ujicoba: "apa resep nasi goreng?" ditolak dengan
+            # benar, lalu disusul saran yang masih tentang nasi goreng — dua
+            # kalimat yang saling membatalkan. Lihat `_saran_dari_materi`.
+            saran = await self._saran_dari_materi(
+                tenant_id=tenant_id, content_id=content_id, course_id=course_id,
+                weeks=weeks, source_filter=source_filter, style=style,
+            )
             result = QueryResult(
                 answer=await self._pesan_tak_terjawab(
                     course_id=course_id, weeks=weeks, tenant_id=tenant_id,
@@ -309,12 +338,12 @@ class RAGPipeline:
                 # "materi tidak mencakup" membuat mahasiswa meragukan seluruh
                 # sitasi — termasuk yang benar.
                 sources=[],
-                recommendations=[],
+                recommendations=saran,
                 decomposition=dq,
             )
             result.interaction_id = log_interaction(
                 question=question, dq=dq, answer=result.answer, sources=[],
-                recommendations=[], elapsed_seconds=time.monotonic() - start,
+                recommendations=saran, elapsed_seconds=time.monotonic() - start,
                 content_id=content_id, session_id=session_id, tenant_id=tenant_id,
             )
             return result
@@ -635,13 +664,24 @@ class RAGPipeline:
 
     async def starter_questions(
         self, content_id: str, source_file: str, model: str | None = None,
-        style: str | None = None, *, tenant_id: str,
+        style: str | None = None, *, tenant_id: str, hanya_cache: bool = False,
     ) -> list[str]:
         """Pertanyaan pembuka untuk sebuah materi, disesuaikan gaya belajar.
 
         Cache dipisah per gaya: pertanyaan untuk gaya "visual" (soal alur dan
         hubungan) tidak cocok dipakai ulang untuk gaya "praktik" (soal cara dan
         penerapan), jadi keduanya tidak boleh berbagi kunci cache.
+
+        `hanya_cache` mengembalikan [] alih-alih membangkitkan saat cache kosong.
+        Dipakai jalur PENOLAKAN, yang tidak boleh memanggil model: gerbang
+        relevansi ada justru untuk menghentikan pembakaran panggilan model pada
+        pertanyaan yang tidak terjawab materi, dan membangkitkan pertanyaan
+        pembuka di sana akan mengembalikan biaya yang baru saja dihemat.
+
+        Saklarnya ada DI SINI, bukan di pemanggil yang membaca cache sendiri,
+        supaya kunci cache dihitung di satu tempat saja. Kunci yang disalin akan
+        berbeda pelan-pelan, dan bedanya muncul sebagai "cache tidak pernah
+        kena" — kemunduran yang tidak terlihat sebagai galat.
         """
         tenant_id = require_tenant_id(tenant_id, operation="starter_questions")
         spec = learning_styles.resolve(style)
@@ -655,6 +695,8 @@ class RAGPipeline:
         )
         if cached is not None:
             return cached
+        if hanya_cache:
+            return []
 
         questions = await self._generator.generate_starter_questions(
             text, model=model, style_hint=spec.starter_hint,
@@ -673,6 +715,103 @@ class RAGPipeline:
                 tenant_id=tenant_id, material_hash=sidik,
             )
         return questions
+
+    async def _saran_dari_materi(
+        self,
+        *,
+        tenant_id: str,
+        content_id: str | None = None,
+        course_id: str | None = None,
+        weeks: Sequence[int] | None = None,
+        source_filter: str | None = None,
+        style: str | None = None,
+        maks: int = 3,
+    ) -> list[str]:
+        """Saran pertanyaan yang diambil DARI materi, untuk jalur penolakan.
+
+        MENGAPA PENOLAKAN TETAP PERLU SARAN
+        Dilaporkan dari ujicoba: "apa resep nasi goreng?" dijawab dengan benar —
+        materi tidak mencakupnya — tetapi saran yang menyertainya masih tentang
+        nasi goreng. Mahasiswa diberi tahu bahwa topiknya di luar materi, lalu
+        ditawari melanjutkan topik yang sama. Dua kalimat yang saling
+        membatalkan.
+
+        Mengosongkan sarannya memang menghilangkan gejala itu, dan itulah yang
+        terjadi sejak gerbang relevansi dipasang. Tetapi mahasiswa yang
+        pertanyaannya ditolak justru yang PALING butuh arah: ia belum tahu apa
+        yang ada di materi. Jadi yang benar bukan nol saran, melainkan saran
+        yang mengacu ke materi — bukan ke pertanyaan yang baru ditolak.
+
+        SUMBERNYA PERTANYAAN PEMBUKA, BUKAN PANGGILAN BARU
+        Pertanyaan pembuka sudah dibuat DARI teks materi dan sudah disaring
+        `saring_saran`, jadi tiap butir yang keluar dari sini sudah diketahui
+        terjawab materi. Tidak ada cara lain yang memberi jaminan itu tanpa
+        membayar pencarian lagi.
+
+        Dan diambil `hanya_cache`: jalur penolakan tidak boleh memanggil model.
+        Kalau cache-nya kosong, yang dikembalikan [] — bukan panggilan baru.
+        Dalam alur yang biasa cache itu sudah hangat, karena mahasiswa melewati
+        halaman materi (yang menampilkan pertanyaan pembuka) sebelum bertanya.
+
+        TIDAK PERNAH MELEMPAR
+        Mahasiswa sedang menunggu jawaban atas pertanyaannya. Kegagalan membaca
+        katalog tidak boleh menggagalkan penolakan yang sudah tersusun, jadi
+        apa pun yang salah di sini berujung [].
+        """
+        tenant_id = require_tenant_id(tenant_id, operation="saran_dari_materi")
+        try:
+            pilihan: tuple[str, str] | None = None
+
+            if content_id and source_filter:
+                pilihan = (content_id, source_filter)
+            elif content_id:
+                berkas = await self._store.list_indexed_files(
+                    content_id, tenant_id=tenant_id,
+                )
+                if berkas:
+                    pilihan = (content_id, berkas[0]["source_file"])
+            elif course_id:
+                # Minggu yang sedang aktif lebih dulu: saran dari minggu yang
+                # tidak sedang dibuka akan ditolak gerbang yang sama ketika
+                # diklik, karena penyaring minggunya masih berlaku.
+                minggu = [m for m in (weeks or []) if m is not None]
+                if not minggu:
+                    minggu = await self._store.list_weeks(
+                        course_id, tenant_id=tenant_id,
+                    )
+                materi = await self._store.list_materials_for_weeks(
+                    course_id, list(minggu), tenant_id=tenant_id,
+                )
+                if materi and materi[0].get("content_id"):
+                    pilihan = (materi[0]["content_id"], materi[0]["source_file"])
+
+            if pilihan is None:
+                return []
+
+            saran = await self.starter_questions(
+                pilihan[0], pilihan[1], style=style,
+                tenant_id=tenant_id, hanya_cache=True,
+            )
+            if not saran:
+                return []
+
+            # Disaring dengan penyaring yang SAMA seperti pertanyaan yang baru
+            # ditolak. Pertanyaan pembuka dibuat untuk SATU materi, dan materi
+            # itu belum tentu berada di minggu yang sedang mahasiswa aktifkan —
+            # menawarkannya tanpa diperiksa berarti saran berikutnya ditolak
+            # juga, yaitu gejala yang fungsi ini ada untuk memperbaiki.
+            #
+            # Hanya pencarian lokal, tanpa satu pun token model, jadi penolakan
+            # tetap bebas dari panggilan LLM.
+            saran = await saring_saran(
+                saran, retriever=self._retriever, content_id=content_id,
+                course_id=course_id, weeks=weeks, source_filter=source_filter,
+                tenant_id=tenant_id,
+            )
+            return saran[:maks]
+        except Exception as exc:  # noqa: BLE001 - penolakan tetap harus terkirim
+            logger.warning("Saran dari materi tidak tersusun: {}", exc)
+            return []
 
     async def ringkasan_riwayat(
         self,
@@ -1259,17 +1398,28 @@ class RAGPipeline:
             tenant_id=tenant_id,
         )
 
-        if not results:
+        # Gerbang relevansi, sama seperti di `query()`. Dulu jalur ini hanya
+        # menolak ketika pencarian mengembalikan NOL hasil — dan dengan penyaring
+        # kampus yang selalu aktif itu hampir tak pernah terjadi, sehingga
+        # pertanyaan di luar materi tetap dijawab di mode terpandu walaupun chat
+        # bebas sudah menolaknya. Dilaporkan sebagai jawaban yang membuka dengan
+        # "tidak tercakup" lalu tetap menjelaskan.
+        if not results or (
+            not _bebas_gerbang(template_id, topic) and not cukup_relevan(results)
+        ):
             pesan = self._pesan_tanpa_materi(topic, section_ids)
+            saran = await self._saran_dari_materi(
+                tenant_id=tenant_id, content_id=content_id, weeks=section_ids,
+            )
             yield {"type": "sources", "sources": []}
             yield {"type": "delta", "text": pesan}
             yield {
                 "type": "done",
                 "answer": pesan,
-                "recommendations": [],
+                "recommendations": saran,
                 "interaction_id": log_interaction(
                     question=topic, dq=dq, answer=pesan, sources=[],
-                    recommendations=[], elapsed_seconds=time.monotonic() - start,
+                    recommendations=saran, elapsed_seconds=time.monotonic() - start,
                     content_id=content_id, session_id=session_id, student_name=student_name,
                     user_id=user_id, tenant_id=tenant_id,
                 ),
@@ -1386,7 +1536,12 @@ class RAGPipeline:
             tenant_id=tenant_id,
         )
         t_retrieve = time.monotonic() - t_stage
-        if not results:
+        # Gerbang relevansi, sama seperti di `query()` dan di jalur streaming.
+        # Lihat catatan di sana: menolak hanya pada hasil KOSONG berarti tidak
+        # pernah menolak sama sekali.
+        if not results or (
+            not _bebas_gerbang(template_id, topic) and not cukup_relevan(results)
+        ):
             # Bedakan sebabnya: kalau mahasiswa mempersempit ke beberapa minggu,
             # penyebab paling mungkin adalah topiknya ada di minggu lain — saran
             # "coba topik lain" akan menyesatkan.
@@ -1402,15 +1557,18 @@ class RAGPipeline:
                     "Coba pertanyaan dengan topik yang berbeda atau periksa apakah "
                     "materi minggu ini sudah diindeks."
                 )
+            saran = await self._saran_dari_materi(
+                tenant_id=tenant_id, content_id=content_id, weeks=section_ids,
+            )
             result = QueryResult(
                 answer=pesan_kosong,
                 sources=[],
-                recommendations=[],
+                recommendations=saran,
                 decomposition=dq,
             )
             result.interaction_id = log_interaction(
                 question=topic, dq=dq, answer=result.answer, sources=[],
-                recommendations=[], elapsed_seconds=time.monotonic() - start,
+                recommendations=saran, elapsed_seconds=time.monotonic() - start,
                 content_id=content_id, session_id=session_id, student_name=student_name,
                 user_id=user_id, tenant_id=tenant_id,
             )

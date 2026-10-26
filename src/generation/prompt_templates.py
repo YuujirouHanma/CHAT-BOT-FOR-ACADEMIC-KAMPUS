@@ -132,6 +132,18 @@ TEMPLATE_REGISTRY: list[PromptTemplate] = [
 # Mapping template_id → PromptTemplate untuk lookup cepat
 TEMPLATE_MAP: dict[str, PromptTemplate] = {t.template_id: t for t in TEMPLATE_REGISTRY}
 
+# Template yang cakupannya ditentukan PENYARING minggu/materi, bukan oleh
+# kemiripan topik — jadi gerbang relevansi tidak berlaku untuknya.
+#
+# `structured_summary` punya `requires_topic_input=False`: mahasiswa memintanya
+# tanpa menyebut topik, dan yang diringkas adalah materi yang sudah dipilih.
+# Terukur pada kasus yang sepadan di chat bebas: "ringkas materi minggu 1"
+# mengambil materi minggu 1 yang BENAR lalu diberi skor 0,009 oleh reranker,
+# karena permintaan ringkasan tidak memuat kandungan topik untuk dicocokkan.
+# Tanpa pengecualian ini, gerbang menolak permintaan yang materinya justru
+# sudah tepat di tangan.
+TEMPLATE_TANPA_GERBANG: frozenset[str] = frozenset({"structured_summary"})
+
 
 # ---------------------------------------------------------------------------
 # System Prompt Builder
