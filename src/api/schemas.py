@@ -135,6 +135,17 @@ class SourceInfo(BaseModel):
     element_type: str | None = None
     content_id: str | None = None
     rerank_score: float | None = None
+    # Isi potongan yang dikutip, apa adanya dari indeks.
+    #
+    # Ada karena .pptx dan .docx tidak punya penampil bawaan peramban: panel
+    # sitasi hanya bisa menyebutkan "halaman 7, buka berkasnya sendiri", dan
+    # mahasiswa yang ingin memeriksa satu kalimat harus mengunduh satu dek
+    # enam puluh slide. Dengan medan ini panelnya dapat menampilkan bagian yang
+    # BENAR-BENAR dikutip tanpa penampil pihak ketiga — artinya tanpa mengirim
+    # materi kelas ke layanan luar.
+    #
+    # TIDAK dicatat ke log HITL; lihat `_sumber_tanpa_teks` di src/pipeline.py.
+    text: str | None = None
 
 
 class Attachment(BaseModel):

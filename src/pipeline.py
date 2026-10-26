@@ -115,6 +115,47 @@ def _umpan_balik_kode(nilai: dict) -> str:
     return "\n".join(bagian)
 
 
+# Batas aksara cuplikan sumber. Ini PENJAGA, bukan pilihan rancangan: potongan
+# memang sudah dibatasi pemecah teks (sekitar 900 aksara), jadi nilai ini hampir
+# tak pernah tersentuh. Ia ada supaya satu potongan yang entah bagaimana lolos
+# jauh lebih besar — tabel lebar, lampiran yang terbaca sebagai satu blok — tidak
+# membengkakkan tiap balasan untuk seluruh kelas.
+_MAKS_CUPLIKAN_SUMBER = 1200
+
+
+def _cuplikan_sumber(teks: str | None) -> str | None:
+    """Isi potongan yang dikutip, untuk ditampilkan di panel sitasi.
+
+    Dikembalikan apa adanya, tanpa dirapikan: yang ingin diperiksa mahasiswa
+    adalah apa yang BENAR-BENAR dibaca model, bukan versi yang sudah dipercantik.
+    """
+    bersih = (teks or "").strip()
+    if not bersih:
+        return None
+    if len(bersih) <= _MAKS_CUPLIKAN_SUMBER:
+        return bersih
+    return bersih[:_MAKS_CUPLIKAN_SUMBER] + "…"
+
+
+def _sumber_tanpa_teks(sumber: list[dict]) -> list[dict]:
+    """Salinan daftar sumber tanpa medan `text`, untuk dicatat ke log.
+
+    MENGAPA DIPISAH DARI YANG DIKIRIM KE KLIEN
+    Teks materi sudah tersimpan di Qdrant. Menyalinnya juga ke log HITL berarti
+    dua salinan materi kampus di dua penyimpanan dengan masa simpan dan jalur
+    penghapusan yang berbeda — jadi menghapus satu kampus menuntut mengingat
+    keduanya, dan yang terlupakan tidak akan terlihat sebagai galat.
+
+    Terukur pada log yang ada (65 interaksi, 3.109 bita rata-rata): membawa
+    potongan utuh membuatnya 2,4 kali lebih besar. Ukurannya bukan alasan
+    utamanya, tetapi ia menegaskan bahwa yang disalin bukan sedikit.
+
+    Dosen yang meninjau jawaban tidak kehilangan apa pun: sitasinya tetap
+    menyebut berkas dan halamannya, dan berkasnya bisa dibuka di halaman itu.
+    """
+    return [{k: v for k, v in s.items() if k != "text"} for s in sumber]
+
+
 def _bebas_gerbang(template_id: str | None, topic: str) -> bool:
     """Apakah permintaan terpandu ini dikecualikan dari gerbang relevansi.
 
@@ -354,17 +395,11 @@ class RAGPipeline:
             history=history,
         )
 
-        sources = [
-            {
-                "index": idx + 1,
-                "source_file": (r.get("payload") or {}).get("source_file"),
-                "page_number": (r.get("payload") or {}).get("page_number"),
-                "element_type": (r.get("payload") or {}).get("element_type"),
-                "content_id": (r.get("payload") or {}).get("content_id"),
-                "rerank_score": r.get("rerank_score"),
-            }
-            for idx, r in enumerate(results)
-        ]
+        # Dulu blok ini menyusun daftar sumbernya sendiri, kata per kata sama
+        # dengan `_build_sources`. Dua salinan berarti medan baru harus
+        # ditambahkan dua kali, dan yang terlewat muncul sebagai "jalur chat
+        # bebas tidak punya medan itu" — bukan sebagai galat.
+        sources = self._build_sources(results)
 
         # Stage 5: generate follow-up questions as a separate call from the main answer.
         recommendations = await self._generator.generate_followup(
@@ -382,7 +417,8 @@ class RAGPipeline:
         )
 
         interaction_id = log_interaction(
-            question=question, dq=dq, answer=answer, sources=sources,
+            question=question, dq=dq, answer=answer,
+            sources=_sumber_tanpa_teks(sources),
             recommendations=recommendations, elapsed_seconds=time.monotonic() - start,
             content_id=content_id, session_id=session_id, tenant_id=tenant_id,
         )
@@ -1262,6 +1298,7 @@ class RAGPipeline:
                 "element_type": (r.get("payload") or {}).get("element_type"),
                 "content_id": (r.get("payload") or {}).get("content_id"),
                 "rerank_score": r.get("rerank_score"),
+                "text": _cuplikan_sumber((r.get("payload") or {}).get("text")),
             }
             for idx, r in enumerate(results)
         ]
@@ -1471,7 +1508,8 @@ class RAGPipeline:
             "recommendations": rekomendasi,
             "interaction_id": log_interaction(
                 question=topic, dq=dq, answer=jawaban,
-                sources=self._build_sources(results), recommendations=rekomendasi,
+                sources=_sumber_tanpa_teks(self._build_sources(results)),
+                recommendations=rekomendasi,
                 elapsed_seconds=time.monotonic() - start,
                 content_id=content_id, session_id=session_id, student_name=student_name,
                 user_id=user_id, tenant_id=tenant_id,
@@ -1636,7 +1674,8 @@ class RAGPipeline:
         sources = self._build_sources(results)
 
         interaction_id = log_interaction(
-            question=topic, dq=dq, answer=answer, sources=sources,
+            question=topic, dq=dq, answer=answer,
+            sources=_sumber_tanpa_teks(sources),
             recommendations=recommendations, elapsed_seconds=time.monotonic() - start,
             content_id=content_id, session_id=session_id, student_name=student_name,
             user_id=user_id, tenant_id=tenant_id,
