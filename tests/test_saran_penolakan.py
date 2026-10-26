@@ -282,3 +282,60 @@ class TestPengecualianGerbang:
     def test_tanpa_template_tetap_diperiksa_teksnya(self) -> None:
         assert _bebas_gerbang(None, "rangkum bab ini")
         assert not _bebas_gerbang(None, "apa resep nasi goreng")
+
+
+class TestPesanPenolakanTetapMenyebutMataKuliah:
+    """Mata kuliah diturunkan dari content_id ketika rutenya mengosongkannya.
+
+    DITEMUKAN SAAT DIJALANKAN
+    `chat.py` sengaja menulis `course_id=session.course_id if not
+    session.content_id else None` — supaya pencarian tidak disaring dua kali
+    oleh hal yang sama. Benar untuk penyaringan, tetapi pesan penolakan ikut
+    kehilangan mata kuliahnya dan jatuh ke kalimat terakhir: "Coba periksa
+    apakah mata kuliahnya sudah dipilih."
+
+    Terukur pada tumpukan yang berjalan: permintaan dengan course_id="sbd" DAN
+    content_id="sbd-minggu-1" dibalas kalimat itu — menyuruh mahasiswa memeriksa
+    pilihan yang baru saja ia buat. Itu kelas kesalahan yang sama dengan
+    "membantah nomor minggu mahasiswa", dan satu-satunya cara menemukannya
+    adalah menjalankannya.
+    """
+
+    @pytest.fixture
+    def pipa(self) -> RAGPipeline:
+        p = RAGPipeline.__new__(RAGPipeline)
+        store = AsyncMock()
+        store.list_weeks = AsyncMock(return_value=[1, 2, 3])
+        p._store = store
+        return p
+
+    async def test_mata_kuliah_diturunkan_dari_content_id(self, pipa) -> None:
+        pesan = await pipa._pesan_tak_terjawab(
+            course_id=None, weeks=None, tenant_id=TENANT,
+            content_id="sbd-minggu-1",
+        )
+
+        assert "Minggu yang sudah punya materi: 1, 2, 3" in pesan
+        assert "sudah dipilih" not in pesan, (
+            "mahasiswa yang sudah memilih materi tidak boleh disuruh "
+            "memeriksa apakah mata kuliahnya sudah dipilih"
+        )
+
+    async def test_course_id_eksplisit_tetap_menang(self, pipa) -> None:
+        pesan = await pipa._pesan_tak_terjawab(
+            course_id="sbd", weeks=None, tenant_id=TENANT,
+            content_id="kka-minggu-9",
+        )
+
+        pipa._store.list_weeks.assert_awaited_once()
+        assert pipa._store.list_weeks.await_args.args[0] == "sbd"
+
+    async def test_tanpa_keduanya_kalimat_itu_memang_benar(self, pipa) -> None:
+        """Pasangannya: kalimat "sudah dipilih" TIDAK dihapus, hanya berhenti
+        muncul di tempat yang salah. Tanpa uji ini, menghapusnya sama sekali
+        juga lulus."""
+        pesan = await pipa._pesan_tak_terjawab(
+            course_id=None, weeks=None, tenant_id=TENANT, content_id=None,
+        )
+
+        assert "sudah dipilih" in pesan

@@ -78,10 +78,32 @@ _MAKS_KUTIPAN = 160
 _MAKS_CONTOH = 12
 
 
-def _tak_terjawab(jawaban: str) -> bool:
-    """Apakah jawaban ini penolakan karena materi tidak mencakup pertanyaannya."""
+def _tak_terjawab(jawaban: str, pertanyaan: str = "") -> bool:
+    """Apakah ini KESENJANGAN MATERI — hal yang dicari mahasiswa dan tidak ada.
+
+    Permintaan ringkasan yang ditolak TIDAK dihitung, walaupun kalimat
+    penolakannya sama. Alasannya: ringkasan tidak pernah bisa menjadi
+    kesenjangan materi — yang diminta justru materi yang sudah dipilih. Kalau ia
+    ditolak, itu kegagalan sistem, bukan kekurangan bahan ajar.
+
+    Terukur saat dicoba pada log sungguhan: "ringkas materi minggu 1" dan
+    "ringkas materi kuliah ini" muncul di daftar "tidak ada di materi yang
+    diunggah" — keduanya penolakan dari perilaku LAMA, sebelum pengecualian
+    ikhtisar dipasang. Dosen yang membaca daftar itu akan menyimpulkan
+    mahasiswa mencari sesuatu yang tidak ia unggah, padahal materinya ada dan
+    yang salah adalah sistemnya.
+
+    Dikenali dengan pengenal yang SAMA seperti gerbang relevansi
+    (`guided.minta_ikhtisar`), bukan daftar kata kedua yang akan berbeda
+    pelan-pelan dari yang pertama.
+    """
     teks = (jawaban or "").lower()
-    return any(p in teks for p in _PENANDA_TAK_TERJAWAB)
+    if not any(p in teks for p in _PENANDA_TAK_TERJAWAB):
+        return False
+
+    from src import guided
+
+    return not guided.minta_ikhtisar(pertanyaan or "")
 
 
 def _kunci_pertanyaan(teks: str) -> str:
@@ -174,7 +196,7 @@ def hitung_fakta(records: list[dict[str, Any]]) -> FaktaRiwayat:
             materi[nama] += 1
 
         pertanyaan = r.get("question") or ""
-        if _tak_terjawab(r.get("answer") or ""):
+        if _tak_terjawab(r.get("answer") or "", pertanyaan):
             fakta.tak_terjawab += 1
             if len(fakta.contoh_tak_terjawab) < _MAKS_CONTOH:
                 fakta.contoh_tak_terjawab.append(_potong(pertanyaan))

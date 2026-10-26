@@ -373,6 +373,7 @@ class RAGPipeline:
             result = QueryResult(
                 answer=await self._pesan_tak_terjawab(
                     course_id=course_id, weeks=weeks, tenant_id=tenant_id,
+                    content_id=content_id,
                 ),
                 # Sumber TIDAK dilampirkan. Dulu penolakan tetap membawa lima
                 # berkas berskor 0,000, dan sitasi yang muncul di bawah jawaban
@@ -1309,6 +1310,7 @@ class RAGPipeline:
         course_id: str | None,
         weeks: Sequence[int] | None,
         tenant_id: str,
+        content_id: str | None = None,
     ) -> str:
         """Penolakan yang menolong, disusun TANPA memanggil model.
 
@@ -1332,6 +1334,20 @@ class RAGPipeline:
             "Sevi hanya menjawab dari materi yang diunggah dosen ke kelas ini, "
             "dan tidak ada bagian materi yang menjawab pertanyaan itu."
         )
+
+        # Mata kuliah diturunkan dari `content_id` ketika pemanggil tidak
+        # mengirimkannya. Itu BUKAN kelonggaran: rutenya sengaja mengosongkan
+        # `course_id` begitu `content_id` terisi, supaya pencarian tidak
+        # disaring dua kali oleh hal yang sama (lihat chat.py). Akibatnya pesan
+        # ini kehilangan mata kuliahnya dan jatuh ke kalimat di bawah — yang
+        # menyuruh mahasiswa "memeriksa apakah mata kuliahnya sudah dipilih"
+        # justru setelah ia memilih mata kuliah, minggu, DAN materi.
+        #
+        # Terukur saat dicoba sungguhan: permintaan dengan course_id="sbd" dan
+        # content_id="sbd-minggu-1" dibalas kalimat itu. Satu penyaring yang
+        # dikosongkan untuk alasan yang benar tidak boleh ikut mematikan pesan
+        # yang tidak ada hubungannya dengan penyaringan.
+        course_id, _, _ = resolve_course_week(content_id, course_id)
 
         if not course_id:
             return dasar + " Coba periksa apakah mata kuliahnya sudah dipilih."

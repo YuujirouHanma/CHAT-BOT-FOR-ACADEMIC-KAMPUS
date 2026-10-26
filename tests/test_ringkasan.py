@@ -361,3 +361,58 @@ class TestRingkasanLewatPipeline:
 
         assert hasil["dari_cache"] is False
         assert gen.summarize_chat_history.await_count == 2
+
+
+class TestRingkasanBukanKesenjanganMateri:
+    """Permintaan ringkasan yang ditolak bukan kesenjangan materi.
+
+    DITEMUKAN SAAT DIJALANKAN PADA LOG SUNGGUHAN
+    Daftar "tidak ada di materi yang diunggah" memuat "ringkas materi minggu 1"
+    dan "ringkas materi kuliah ini" — keduanya penolakan dari perilaku LAMA,
+    sebelum pengecualian ikhtisar dipasang di gerbang relevansi.
+
+    Dosen yang membaca daftar itu menyimpulkan mahasiswa mencari sesuatu yang
+    tidak ia unggah. Padahal materinya ADA; yang salah sistemnya. Angka yang
+    salah arah lebih buruk daripada angka yang tidak ada, karena ia menuntun
+    dosen menambah materi yang sudah lengkap.
+
+    Terukur pada log 72 interaksi: 10 penolakan, 3 di antaranya permintaan
+    ringkasan. Setelah dikecualikan: 7.
+    """
+
+    def test_permintaan_ringkasan_tidak_dihitung(self) -> None:
+        fakta = hitung_fakta([
+            _rec(question="ringkas materi minggu 1",
+                 answer="tidak ada bagian materi yang menjawab pertanyaan itu"),
+            _rec(question="rangkum bab ini",
+                 answer="Materi yang tersedia tidak mencakup informasi tentang itu"),
+        ])
+
+        assert fakta.tak_terjawab == 0
+        assert fakta.contoh_tak_terjawab == []
+
+    def test_pertanyaan_di_luar_materi_tetap_dihitung(self) -> None:
+        """Pasangannya. Tanpa ini, pengecualian yang membuang SEMUANYA juga lulus."""
+        fakta = hitung_fakta([
+            _rec(question="apa resep nasi goreng",
+                 answer="tidak ada bagian materi yang menjawab pertanyaan itu"),
+        ])
+
+        assert fakta.tak_terjawab == 1
+        assert fakta.contoh_tak_terjawab == ["apa resep nasi goreng"]
+
+    def test_dikenali_dengan_pengenal_yang_sama_seperti_gerbang(self) -> None:
+        """Kalau daftar katanya disalin alih-alih dipakai bersama, keduanya akan
+        berbeda pelan-pelan: gerbang mengecualikan satu kata, penghitung tidak,
+        lalu angkanya salah tanpa satu pun uji merah."""
+        from src import guided
+
+        for kata in ("ringkas", "ringkasan", "rangkum", "rangkuman", "ikhtisar"):
+            pertanyaan = f"{kata} materi ini"
+            assert guided.minta_ikhtisar(pertanyaan), kata
+            assert not _tak_terjawab(
+                "tidak ada bagian materi yang menjawab pertanyaan itu", pertanyaan,
+            ), kata
+
+    def test_jawaban_biasa_tetap_bukan_penolakan(self) -> None:
+        assert not _tak_terjawab("Normalisasi adalah proses...", "ringkas materi")

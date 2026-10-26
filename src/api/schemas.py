@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from src import model_registry
+
 # --- pola bersama ---
 # Identitas yang ikut menjadi nama berkas / kunci filter: tanpa garis miring,
 # tanpa titik ganda, tanpa spasi.
@@ -109,12 +111,25 @@ class QueryRequest(TenantScopedRequest):
     def kunci_model(self) -> str | None:
         """Satu kunci registry dari dua cara klien menyebut model.
 
-        Portal mengirim penyedia dan nama terpisah; registry memakai satu kunci
-        yang penyedianya sudah melekat. `model` menang bila keduanya terkirim.
+        Portal mengirim penyedia dan nama terpisah, dan `model_name` berisi id
+        milik PENYEDIA ("qwen/qwen3.7-plus") karena itu yang tersimpan di tabel
+        `generation_models`. Registry memakai kunci pendeknya sendiri
+        ("qwen3.7-plus"). Penerjemahannya ada di `model_registry.kunci_untuk`.
+
+        Sebelumnya id penyedia diteruskan apa adanya sebagai kunci, sehingga
+        pencariannya gagal dan permintaan dilayani model BAWAAN tanpa satu pun
+        tanda ke pemanggil. `model` menang bila keduanya terkirim.
+
+        Bila penerjemahan gagal, nilai asli diteruskan — bukan None — supaya
+        peringatan "Unknown model" di `LLMGenerator._resolve` tetap menyebut apa
+        yang sebenarnya diminta pemanggil.
         """
         if self.model:
             return self.model
-        return (self.model_name or "").strip() or None
+        nama = (self.model_name or "").strip()
+        if not nama:
+            return None
+        return model_registry.kunci_untuk(self.model_provider, nama) or nama
 
     def identitas_mahasiswa(self) -> str | None:
         """Pengenal mahasiswa, apa pun nama medan yang dipakai pemanggil.
@@ -497,10 +512,16 @@ class _EvaluationTarget(BaseModel):
         return sorted({int(w) for w in self.section_ids or []})
 
     def kunci_model(self) -> str | None:
-        """Satu kunci registry dari dua cara klien menyebut model."""
+        """Satu kunci registry dari dua cara klien menyebut model.
+
+        Lihat `QueryRequest.kunci_model` untuk alasan penerjemahannya.
+        """
         if self.model:
             return self.model
-        return (self.model_name or "").strip() or None
+        nama = (self.model_name or "").strip()
+        if not nama:
+            return None
+        return model_registry.kunci_untuk(self.model_provider, nama) or nama
 
 
 class EvaluationQuestionsRequest(_EvaluationTarget):
@@ -592,10 +613,16 @@ class _LivecodeTarget(BaseModel):
         return sorted({int(w) for w in self.section_ids or []})
 
     def kunci_model(self) -> str | None:
-        """Satu kunci registry dari dua cara klien menyebut model."""
+        """Satu kunci registry dari dua cara klien menyebut model.
+
+        Lihat `QueryRequest.kunci_model` untuk alasan penerjemahannya.
+        """
         if self.model:
             return self.model
-        return (self.model_name or "").strip() or None
+        nama = (self.model_name or "").strip()
+        if not nama:
+            return None
+        return model_registry.kunci_untuk(self.model_provider, nama) or nama
 
 
 class LivecodeExercisesRequest(_LivecodeTarget):
