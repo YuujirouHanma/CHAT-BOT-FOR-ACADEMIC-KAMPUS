@@ -22,12 +22,10 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 from src.config import settings
 from src.pipeline import (
-    RAGPipeline,
     _MAKS_CUPLIKAN_SUMBER,
+    RAGPipeline,
     _cuplikan_sumber,
     _sumber_tanpa_teks,
 )

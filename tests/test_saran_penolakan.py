@@ -322,7 +322,10 @@ class TestPesanPenolakanTetapMenyebutMataKuliah:
         )
 
     async def test_course_id_eksplisit_tetap_menang(self, pipa) -> None:
-        pesan = await pipa._pesan_tak_terjawab(
+        # Kalimat yang keluar tidak diperiksa di sini. Yang diuji MATA KULIAH
+        # MANA yang dipakai membaca katalog: kalau turunan dari content_id
+        # menang, `list_weeks` akan dipanggil dengan "kka", bukan "sbd".
+        await pipa._pesan_tak_terjawab(
             course_id="sbd", weeks=None, tenant_id=TENANT,
             content_id="kka-minggu-9",
         )

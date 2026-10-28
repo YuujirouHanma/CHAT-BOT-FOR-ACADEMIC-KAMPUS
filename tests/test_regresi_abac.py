@@ -24,9 +24,9 @@ from src.config import settings
 from src.pipeline import RAGPipeline
 from src.schemas import Chunk, ElementType
 from src.storage import content_store, tenant_store
-from tests.conftest import RetrieverPalsu
 from src.storage.qdrant_store import QdrantStore
 from src.tenancy import ALL_SCOPES
+from tests.conftest import RetrieverPalsu
 
 TENANT = "kampus-a"
 
